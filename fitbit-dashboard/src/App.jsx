@@ -20,9 +20,13 @@ function App() {
     useEffect(() => {
         const params = new URLSearchParams(window.location.search);
         const tokenParam = params.get('token');
+        const refreshParam = params.get('refresh');
         if (tokenParam) {
             setToken(tokenParam);
             localStorage.setItem('fitbit_token', tokenParam);
+            if (refreshParam) {
+                localStorage.setItem('fitbit_refresh_token', refreshParam);
+            }
             window.history.replaceState({}, document.title, "/dashboard");
         } else {
             const storedToken = localStorage.getItem('fitbit_token');
@@ -37,7 +41,9 @@ function App() {
     const fetchHealthData = async (selectedDate) => {
         setLoading(true);
         try {
-            const response = await axios.get(`http://localhost:3000/api/health-data?date=${selectedDate}`, {
+            const refreshToken = localStorage.getItem('fitbit_refresh_token');
+            const url = `http://localhost:3000/api/health-data?date=${selectedDate}${refreshToken ? `&refresh=${refreshToken}` : ''}`;
+            const response = await axios.get(url, {
                 headers: { Authorization: `Bearer ${token}` }
             });
             setData(response.data);
@@ -50,13 +56,14 @@ function App() {
     };
 
     const handleLogin = () => {
-        window.location.href = 'http://localhost:3000/auth/fitbit';
+        window.location.href = 'http://localhost:3000/auth/google';
     };
 
     const handleLogout = () => {
         setToken(null);
         setData(null);
         localStorage.removeItem('fitbit_token');
+        localStorage.removeItem('fitbit_refresh_token');
     };
 
     if (!token) {
@@ -239,26 +246,6 @@ function App() {
                             </div>
                         </section>
 
-                        {/* Devices */}
-                        <section>
-                            <h2 className="text-lg font-bold mb-6 pb-4 border-b border-white/5">Connected devices</h2>
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                {data.devices?.map((device, idx) => (
-                                    <div key={idx} className="bg-gray-900 border border-white/5 rounded-lg p-4">
-                                        <div className="flex justify-between items-start mb-3">
-                                            <div className="p-2 bg-blue-500/10 rounded">
-                                                <Watch className="w-4 h-4 text-blue-400" />
-                                            </div>
-                                            <span className={`text-xs font-medium px-2 py-1 rounded ${device.battery === 'Low' ? 'bg-amber-500/10 text-amber-400' : 'bg-emerald-500/10 text-emerald-400'}`}>
-                                                {device.battery}
-                                            </span>
-                                        </div>
-                                        <h4 className="text-sm font-bold">{device.deviceVersion}</h4>
-                                        <p className="text-xs text-gray-500 mt-2">Synced: {new Date(device.lastSyncTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
-                                    </div>
-                                ))}
-                            </div>
-                        </section>
                     </div>
                 ) : (
                     <div className="text-center py-32">

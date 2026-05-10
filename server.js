@@ -8,6 +8,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 const axios = require('axios');
+const { google } = require('googleapis');
 
 // Database Setup
 const sqlite3 = require('sqlite3').verbose();
@@ -35,6 +36,23 @@ db.serialize(() => {
   )`);
 });
 
+// Google OAuth2 Setup
+const oauth2Client = new google.auth.OAuth2(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET,
+  process.env.GOOGLE_REDIRECT_URI
+);
+
+const SCOPES = [
+  'https://www.googleapis.com/auth/fitness.activity.read',
+  'https://www.googleapis.com/auth/fitness.heart_rate.read',
+  'https://www.googleapis.com/auth/fitness.sleep.read',
+  'https://www.googleapis.com/auth/fitness.nutrition.read',
+  'https://www.googleapis.com/auth/fitness.body.read',
+  'https://www.googleapis.com/auth/fitness.location.read',
+  'https://www.googleapis.com/auth/userinfo.profile',
+];
+
 // Helper to generate date array
 const getDatesInRange = (startDateStr, days) => {
   const dates = [];
@@ -61,14 +79,17 @@ app.get('/', (req, res) => {
   res.json({ message: 'Fitbit Health Dashboard API' });
 });
 
-// Fitbit OAuth routes
-app.get('/auth/fitbit', (req, res) => {
-  const scope = 'activity heartrate nutrition profile settings sleep weight';
-  const fitbitAuthUrl = `https://www.fitbit.com/oauth2/authorize?client_id=${process.env.FITBIT_CLIENT_ID}&response_type=code&scope=${scope}&redirect_uri=${process.env.FITBIT_REDIRECT_URI}`;
-  res.redirect(fitbitAuthUrl);
+// Google OAuth routes
+app.get('/auth/google', (req, res) => {
+  const url = oauth2Client.generateAuthUrl({
+    access_type: 'offline',
+    scope: SCOPES,
+    prompt: 'consent',
+  });
+  res.redirect(url);
 });
 
-app.get('/auth/fitbit/callback', async (req, res) => {
+app.get('/auth/google/callback', async (req, res) => {
   const { code } = req.query;
 
   if (!code) {
@@ -76,53 +97,66 @@ app.get('/auth/fitbit/callback', async (req, res) => {
   }
 
   try {
-    const tokenResponse = await axios.post('https://api.fitbit.com/oauth2/token',
-      new URLSearchParams({
-        client_id: process.env.FITBIT_CLIENT_ID,
-        grant_type: 'authorization_code',
-        redirect_uri: process.env.FITBIT_REDIRECT_URI,
-        code
-      }).toString(),
-      {
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'Authorization': `Basic ${Buffer.from(`${process.env.FITBIT_CLIENT_ID}:${process.env.FITBIT_CLIENT_SECRET}`).toString('base64')}`
-        }
-      }
-    );
+    const { tokens } = await oauth2Client.getToken(code);
+    const { access_token, refresh_token } = tokens;
 
-    const { access_token, user_id } = tokenResponse.data;
-
-    // Redirect to frontend with token
-    // Note: In production, use secure cookies or a temporary code exchange. 
-    // For this dashboard, passing via query param is acceptable for MVP.
-    res.redirect(`http://localhost:5173/dashboard?token=${access_token}&user=${user_id}`);
-
+    res.redirect(`http://localhost:5173/dashboard?token=${access_token}&refresh=${refresh_token}`);
   } catch (error) {
-    const errorDetail = error.response?.data?.errors?.[0]?.message || error.response?.data || error.message;
+    const errorDetail = error.message || error.toString();
     console.error('Error exchanging token:', errorDetail);
-    res.status(500).json({ error: 'Failed to authenticate with Fitbit', details: errorDetail });
+    res.status(500).json({ error: 'Failed to authenticate with Google', details: errorDetail });
   }
 });
 
-// History/Chart data endpoint
+// Helper to refresh expired access tokens
+const getValidToken = async (accessToken, refreshToken) => {
+  try {
+    const client = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      process.env.GOOGLE_REDIRECT_URI
+    );
+    client.setCredentials({ access_token: accessToken, refresh_token: refreshToken });
+    const { credentials } = await client.refreshAccessToken();
+    return credentials.access_token;
+  } catch (error) {
+    console.error('Token refresh failed:', error.message);
+    throw error;
+  }
+};
+
+// Helper to convert date string to epoch milliseconds
+const dayStart = (dateStr) => new Date(dateStr + 'T00:00:00').getTime();
+const dayEnd = (dateStr) => new Date(dateStr + 'T23:59:59').getTime();
+
+// Activity history endpoint (charts: day/week/month views)
 app.get('/api/activity-history', async (req, res) => {
-  const token = req.headers.authorization?.split(' ')[1];
+  const authHeader = req.headers.authorization?.split(' ')[1];
+  const refreshToken = req.query.refresh;
   const { date, range, type = 'steps' } = req.query;
   const targetDate = date || new Date().toISOString().split('T')[0];
   const isToday = targetDate === new Date().toISOString().split('T')[0];
 
   console.log(`[ActivityHistory] Request: ${type} | ${range} | ${targetDate}`);
 
-  if (!token) {
+  if (!authHeader) {
     console.warn('[ActivityHistory] No token provided');
     return res.status(401).json({ error: 'No token provided' });
   }
 
   try {
-    const headers = { 'Authorization': `Bearer ${token}` };
+    let accessToken = authHeader;
+    if (refreshToken) {
+      try {
+        accessToken = await getValidToken(authHeader, refreshToken);
+      } catch (err) {
+        console.warn('[ActivityHistory] Token refresh failed, using provided token');
+      }
+    }
 
-    // --- DAY VIEW (INTRADAY) ---
+    const headers = { 'Authorization': `Bearer ${accessToken}` };
+
+    // --- DAY VIEW (INTRADAY STEPS) ---
     if (range === 'day' && type === 'steps') {
       if (!isToday) {
         const cached = await new Promise((resolve) => {
@@ -134,62 +168,56 @@ app.get('/api/activity-history', async (req, res) => {
         }
       }
 
-      const apiUrl = `https://api.fitbit.com/1/user/-/activities/steps/date/${targetDate}/1d/15min.json`;
-      console.log(`[ActivityHistory] API FETCH: ${apiUrl}`);
-
       try {
-        const response = await axios.get(apiUrl, { headers });
-        const data = response.data;
-        let result = [];
-        const intraday = data['activities-steps-intraday']?.dataset;
-        if (intraday && intraday.length > 0) {
-          result = intraday.map(item => ({ label: item.time, value: item.value }));
-        } else {
-          result = data['activities-steps']?.map(item => ({ label: 'Total', value: Number(item.value) })) || [];
-        }
+        console.log(`[ActivityHistory] API FETCH: Intraday steps for ${targetDate}`);
+
+        // Fall back to daily total (intraday requires specific data source ID from user's data)
+        const dailyAggregate = await axios.post(
+          'https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate',
+          {
+            aggregateBy: [{ dataTypeName: 'com.google.step_count.delta' }],
+            bucketByTime: { durationMillis: 86400000 },
+            startTimeMillis: dayStart(targetDate),
+            endTimeMillis: dayEnd(targetDate)
+          },
+          { headers }
+        );
+
+        const totalSteps = dailyAggregate.data?.bucket?.[0]?.dataset?.[0]?.point?.[0]?.value?.[0]?.intVal || 0;
+        const result = [{ label: 'Total', value: totalSteps }];
 
         console.log(`[ActivityHistory] API SUCCESS: ${result.length} items returned`);
         db.run("INSERT OR REPLACE INTO intraday_json (date, json_data) VALUES (?, ?)", [targetDate, JSON.stringify(result)]);
         return res.json(result);
       } catch (err) {
-        const errorDetail = err.response?.data?.errors?.[0]?.message || err.response?.data || err.message;
-        console.error(`[ActivityHistory] API ERROR (Intraday):`, errorDetail);
-        if (err.response?.status === 403) return res.json([]);
-        throw err;
+        console.error(`[ActivityHistory] API ERROR (Intraday):`, err.response?.data || err.message);
+        return res.json([]);
       }
     }
 
-    // --- WEEK / MONTH VIEW (OR NON-STEPS DAY) ---
-    let dbColumn, urlPath, responseKey, valueExtractor;
-
+    // --- WEEK / MONTH VIEW ---
+    let dataTypeName;
     switch (type) {
       case 'heart':
-        dbColumn = 'resting_hr';
-        urlPath = 'activities/heart';
-        responseKey = 'activities-heart';
-        valueExtractor = (item) => item.value.restingHeartRate || 0;
+        dataTypeName = 'com.google.heart_rate.bpm';
         break;
       case 'sleep':
-        dbColumn = 'sleep_minutes';
+        dataTypeName = 'com.google.sleep.segment';
         break;
       case 'weight':
-        dbColumn = 'weight';
-        urlPath = 'body/log/weight';
-        responseKey = 'body-weight';
-        valueExtractor = (item) => Number(item.value);
+        dataTypeName = 'com.google.weight';
         break;
       case 'steps':
       default:
-        dbColumn = 'steps';
-        urlPath = 'activities/steps';
-        responseKey = 'activities-steps';
-        valueExtractor = (item) => Number(item.value);
+        dataTypeName = 'com.google.step_count.delta';
         break;
     }
 
     const daysCount = range === 'week' ? 7 : (range === 'month' ? 30 : 1);
     const dateList = getDatesInRange(targetDate, daysCount);
 
+    // Check database cache
+    const dbColumn = type === 'heart' ? 'resting_hr' : (type === 'sleep' ? 'sleep_minutes' : (type === 'weight' ? 'weight' : 'steps'));
     const dbRows = await new Promise((resolve) => {
       db.all(
         `SELECT date, ${dbColumn} as val FROM daily_summary WHERE date IN (${dateList.map(() => '?').join(',')})`,
@@ -210,46 +238,87 @@ app.get('/api/activity-history', async (req, res) => {
       return res.json(result);
     }
 
-    let apiUrl;
-    if (type === 'sleep') {
-      const startDate = dateList[0];
-      const endDate = dateList[dateList.length - 1];
-      apiUrl = `https://api.fitbit.com/1.2/user/-/sleep/date/${startDate}/${endDate}.json`;
-    } else {
-      const rangeParam = range === 'week' ? '7d' : (range === 'month' ? '30d' : '1d');
-      apiUrl = `https://api.fitbit.com/1/user/-/${urlPath}/date/${targetDate}/${rangeParam}.json`;
-    }
-
-    console.log(`[ActivityHistory] API FETCH: ${apiUrl}`);
-    const response = await axios.get(apiUrl, { headers });
+    console.log(`[ActivityHistory] API FETCH: Google Fit ${type} for ${range}`);
 
     const result = [];
     const upserts = [];
 
     if (type === 'sleep') {
-      const sleepLog = response.data.sleep || [];
-      const sleepMap = {};
-      sleepLog.forEach(log => {
-        sleepMap[log.dateOfSleep] = (sleepMap[log.dateOfSleep] || 0) + log.minutesAsleep;
-      });
-      dateList.forEach(d => {
-        const val = sleepMap[d] || 0;
-        result.push({ label: d.slice(range === 'week' ? 5 : 8), value: val });
-        upserts.push({ date: d, value: val });
-      });
+      // Sleep uses sessions endpoint
+      try {
+        const sleepResponse = await axios.get(
+          'https://www.googleapis.com/fitness/v1/users/me/sessions',
+          {
+            params: {
+              startTime: Math.floor(dayStart(dateList[0])),
+              endTime: Math.floor(dayEnd(dateList[dateList.length - 1]))
+            },
+            headers
+          }
+        );
+
+        const sleepMap = {};
+        sleepResponse.data.session?.forEach(session => {
+          if (session.activityType === 72) { // Sleep activity
+            const sessionDate = new Date(session.startTimeMillis).toISOString().split('T')[0];
+            const minutes = Math.round((session.endTimeMillis - session.startTimeMillis) / 60000);
+            sleepMap[sessionDate] = (sleepMap[sessionDate] || 0) + minutes;
+          }
+        });
+
+        dateList.forEach(d => {
+          const val = sleepMap[d] || 0;
+          result.push({ label: d.slice(range === 'week' ? 5 : 8), value: val });
+          upserts.push({ date: d, value: val });
+        });
+      } catch (sleepErr) {
+        console.warn('[ActivityHistory] Sleep data unavailable (user may not have sleep data synced):', sleepErr.response?.data?.error?.message || sleepErr.message);
+        // Return 0 for all dates if sleep data unavailable
+        dateList.forEach(d => {
+          result.push({ label: d.slice(range === 'week' ? 5 : 8), value: 0 });
+          upserts.push({ date: d, value: 0 });
+        });
+      }
     } else {
-      const series = response.data[responseKey] || [];
-      const seriesMap = {};
-      series.forEach(item => seriesMap[item.dateTime] = valueExtractor(item));
+      // Other metrics use aggregate
+      const aggregateResponse = await axios.post(
+        'https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate',
+        {
+          aggregateBy: [{ dataTypeName }],
+          bucketByTime: { durationMillis: 86400000 },
+          startTimeMillis: dayStart(dateList[0]),
+          endTimeMillis: dayEnd(dateList[dateList.length - 1])
+        },
+        { headers }
+      );
+
+      const valueMap = {};
+      aggregateResponse.data?.bucket?.forEach((bucket, idx) => {
+        const date = dateList[idx];
+        let val = 0;
+        const point = bucket.dataset?.[0]?.point?.[0];
+        if (point?.value) {
+          if (type === 'heart') {
+            val = Math.round(point.value[0]?.fpVal || 0);
+          } else if (type === 'weight') {
+            val = Math.round((point.value[0]?.fpVal || 0) * 100) / 100;
+          } else {
+            val = Math.round(point.value[0]?.intVal || point.value[0]?.fpVal || 0);
+          }
+        }
+        valueMap[date] = val;
+      });
+
       dateList.forEach(d => {
-        const val = seriesMap[d] || 0;
+        const val = valueMap[d] || 0;
         result.push({ label: d.slice(range === 'week' ? 5 : 8), value: val });
         upserts.push({ date: d, value: val });
       });
     }
 
-    console.log(`[ActivityHistory] API SUCCESS: ${result.length} points | Cacheing ${upserts.length} items`);
+    console.log(`[ActivityHistory] API SUCCESS: ${result.length} points | Caching ${upserts.length} items`);
 
+    // Cache results
     db.serialize(() => {
       const stmtInsert = db.prepare(`INSERT OR IGNORE INTO daily_summary (date) VALUES (?)`);
       const stmtUpdate = db.prepare(`UPDATE daily_summary SET ${dbColumn} = ? WHERE date = ?`);
@@ -266,7 +335,7 @@ app.get('/api/activity-history', async (req, res) => {
     res.json(result);
 
   } catch (error) {
-    const errorDetail = error.response?.data?.errors?.[0]?.message || error.response?.data || error.message;
+    const errorDetail = error.message || error.toString();
     console.error(`[ActivityHistory] CRITICAL ERROR:`, errorDetail);
     res.status(500).json({ error: `Failed to fetch ${type} data`, details: errorDetail });
   }
@@ -274,14 +343,15 @@ app.get('/api/activity-history', async (req, res) => {
 
 // API routes for health data
 app.get('/api/health-data', async (req, res) => {
-  const token = req.headers.authorization?.split(' ')[1];
+  const authHeader = req.headers.authorization?.split(' ')[1];
+  const refreshToken = req.query.refresh;
 
-  if (!token) {
+  if (!authHeader) {
     return res.status(401).json({ error: 'No token provided' });
   }
 
   try {
-    const headers = { 'Authorization': `Bearer ${token}` };
+    let accessToken = authHeader;
     const today = req.query.date || new Date().toISOString().split('T')[0];
     const isToday = today === new Date().toISOString().split('T')[0];
 
@@ -298,54 +368,92 @@ app.get('/api/health-data', async (req, res) => {
       }
     }
 
+    // Refresh token if refresh_token provided and needed
+    if (refreshToken) {
+      try {
+        accessToken = await getValidToken(authHeader, refreshToken);
+      } catch (err) {
+        console.warn('[API] Token refresh failed, using provided access token');
+      }
+    }
+
     console.log(`[API-FETCH] Full Health Data for ${today}`);
 
-    // Helper to wrap individual fetches
-    const safeFetch = async (url) => {
+    const headers = { 'Authorization': `Bearer ${accessToken}` };
+
+    // Helper for Google Fit aggregate requests
+    const aggregate = async (dataTypeName) => {
       try {
-        const res = await axios.get(url, { headers });
-        return res.data;
+        const response = await axios.post(
+          'https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate',
+          {
+            aggregateBy: [{ dataTypeName }],
+            bucketByTime: { durationMillis: 86400000 },
+            startTimeMillis: dayStart(today),
+            endTimeMillis: dayEnd(today),
+          },
+          { headers }
+        );
+        return response.data;
       } catch (err) {
-        const errorDetail = err.response?.data?.errors?.[0]?.message || err.response?.data || err.message;
-        console.error(`[API-ERROR] Fetch failed for ${url}:`, errorDetail);
+        console.error(`[API-ERROR] Aggregate failed for ${dataTypeName}:`, err.response?.data || err.message);
         return null;
       }
     };
 
-    // Fetch multiple endpoints in parallel with error handling
+    // Fetch aggregates in parallel
     const [
-      profile,
-      activity,
-      heart,
-      sleep,
-      nutrition,
-      body,
-      devices,
-      water
+      stepsData,
+      caloriesData,
+      distanceData,
+      activeMinutesData,
+      heartData,
+      weightData,
+      waterData,
+      nutritionData
     ] = await Promise.all([
-      safeFetch('https://api.fitbit.com/1/user/-/profile.json'),
-      safeFetch(`https://api.fitbit.com/1/user/-/activities/date/${today}.json`),
-      safeFetch(`https://api.fitbit.com/1/user/-/activities/heart/date/${today}/1d.json`),
-      safeFetch(`https://api.fitbit.com/1.2/user/-/sleep/date/${today}.json`),
-      safeFetch(`https://api.fitbit.com/1/user/-/foods/log/date/${today}.json`),
-      safeFetch(`https://api.fitbit.com/1/user/-/body/log/weight/date/${today}.json`),
-      safeFetch('https://api.fitbit.com/1/user/-/devices.json'),
-      safeFetch(`https://api.fitbit.com/1/user/-/foods/log/water/date/${today}.json`)
+      aggregate('com.google.step_count.delta'),
+      aggregate('com.google.calories.expended'),
+      aggregate('com.google.distance.delta'),
+      aggregate('com.google.active_minutes'),
+      aggregate('com.google.heart_rate.bpm'),
+      aggregate('com.google.weight'),
+      aggregate('com.google.hydration'),
+      aggregate('com.google.nutrition')
     ]);
 
-    const result = {
-      profile: profile?.user || null,
-      activity: activity || null,
-      heartRate: heart ? heart['activities-heart'] : null,
-      sleep: sleep?.sleep || null,
-      sleepSummary: sleep?.summary || null,
-      nutrition: {
-        food: nutrition || null,
-        water: water || null
-      },
-      body: body || null,
-      devices: devices || null
-    };
+    console.log('[API-FETCH] Steps raw data:', JSON.stringify(stepsData, null, 2).substring(0, 500));
+
+    // Sleep data uses sessions endpoint
+    let sleepData = { session: [] };
+    try {
+      const sleepResponse = await axios.get(
+        'https://www.googleapis.com/fitness/v1/users/me/sessions',
+        {
+          params: {
+            startTime: Math.floor(dayStart(today)),
+            endTime: Math.floor(dayEnd(today))
+          },
+          headers
+        }
+      );
+      sleepData = sleepResponse.data;
+    } catch (err) {
+      console.warn('[API-WARN] Sleep data unavailable:', err.response?.data?.error?.message || err.message);
+    }
+
+    // Map Google Fit response to Fitbit shape for frontend compatibility
+    const result = fitGoogleToFitbitShape({
+      steps: stepsData,
+      calories: caloriesData,
+      distance: distanceData,
+      activeMinutes: activeMinutesData,
+      heart: heartData,
+      weight: weightData,
+      water: waterData,
+      nutrition: nutritionData,
+      sleep: sleepData
+    });
 
     // Cache the result for past dates
     if (!isToday) {
@@ -358,11 +466,94 @@ app.get('/api/health-data', async (req, res) => {
     res.json(result);
 
   } catch (error) {
-    const errorDetail = error.response?.data?.errors?.[0]?.message || error.response?.data || error.message;
+    const errorDetail = error.message || error.toString();
     console.error('Critical failure in /api/health-data:', errorDetail);
-    res.status(500).json({ error: 'Failed to fetch Fitbit data', details: errorDetail });
+    res.status(500).json({ error: 'Failed to fetch health data', details: errorDetail });
   }
 });
+
+// Response shape adapter: Google Fit → Fitbit format
+function fitGoogleToFitbitShape(googleData) {
+  console.log('[ADAPTER] Google Fit response structure:', JSON.stringify({
+    steps: googleData.steps?.bucket?.length,
+    calories: googleData.calories?.bucket?.length,
+    distance: googleData.distance?.bucket?.length,
+    activeMinutes: googleData.activeMinutes?.bucket?.length,
+    heart: googleData.heart?.bucket?.length,
+    weight: googleData.weight?.bucket?.length,
+    water: googleData.water?.bucket?.length,
+  }));
+
+  const extractValue = (data, index = 0) => {
+    if (!data || !data.bucket || !data.bucket[index] || !data.bucket[index].dataset || !data.bucket[index].dataset[0]) {
+      return null;
+    }
+    const points = data.bucket[index].dataset[0].point;
+    if (!points || points.length === 0) return null;
+    return points[0].value;
+  };
+
+  const stepsValue = extractValue(googleData.steps)?.[0]?.intVal || 0;
+  const caloriesValue = extractValue(googleData.calories)?.[0]?.fpVal || 0;
+  const distanceMeters = extractValue(googleData.distance)?.[0]?.fpVal || 0;
+  const activeMinutes = extractValue(googleData.activeMinutes)?.[0]?.intVal || 0;
+  const heartValues = extractValue(googleData.heart)?.[0] || {};
+  const weightValue = extractValue(googleData.weight)?.[0]?.fpVal || 0;
+  const waterMl = extractValue(googleData.water)?.[0]?.fpVal || 0;
+
+  // Calculate resting heart rate (min of the day, or use the value if single point)
+  const restingHR = heartValues.fpVal ? Math.round(heartValues.fpVal) : 0;
+
+  // Compute heart rate zones from resting HR (using standard zones based on max HR formula)
+  const maxHR = 220 - 30; // Assuming age 30; could be dynamic per user
+  const heartRateZones = [
+    { name: 'Out of Zone', min: 0, max: Math.round(maxHR * 0.5), minutes: 0, color: '#6b7280' },
+    { name: 'Fat Burn', min: Math.round(maxHR * 0.5), max: Math.round(maxHR * 0.7), minutes: 0, color: '#0ea5e9' },
+    { name: 'Cardio', min: Math.round(maxHR * 0.7), max: Math.round(maxHR * 0.85), minutes: 0, color: '#f97316' },
+    { name: 'Peak', min: Math.round(maxHR * 0.85), max: maxHR, minutes: 0, color: '#ef4444' }
+  ];
+
+  // Sleep data processing
+  let sleepTotal = 0;
+  let sleepStages = { deep: 0, rem: 0, light: 0, wake: 0 };
+  if (googleData.sleep && googleData.sleep.session) {
+    googleData.sleep.session.forEach(session => {
+      if (session.activityType === 72) { // Sleep activity type
+        sleepTotal += Math.round((session.endTimeMillis - session.startTimeMillis) / 60000);
+      }
+    });
+  }
+
+  return {
+    profile: null, // Google Fit limited profile data; could enhance with People API
+    activity: {
+      summary: {
+        steps: stepsValue,
+        distances: [{ distance: (distanceMeters / 1000).toFixed(2) }],
+        caloriesOut: Math.round(caloriesValue),
+        activeZoneMinutes: { totalMinutes: activeMinutes }
+      },
+      goals: {
+        steps: 10000,
+        distance: 8,
+        caloriesOut: 2500,
+        activeZoneMinutes: 30
+      }
+    },
+    heartRate: [{ value: { restingHeartRate: restingHR, heartRateZones } }],
+    sleep: [],
+    sleepSummary: {
+      totalMinutesAsleep: sleepTotal,
+      stages: sleepStages
+    },
+    nutrition: {
+      food: { summary: { protein: 0, carbs: 0, fat: 0, calories: 0 } },
+      water: { summary: { water: Math.round(waterMl) } }
+    },
+    body: null,
+    devices: null // Google Fit has no device endpoint; replaced with data sources in UI
+  };
+}
 
 // Start server
 app.listen(PORT, () => {

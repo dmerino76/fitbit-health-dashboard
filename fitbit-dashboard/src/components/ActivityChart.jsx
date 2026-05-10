@@ -20,8 +20,9 @@ const ActivityChart = ({ token, date, title = "Activity Trends", icon: Icon = Ac
     const fetchHistory = async () => {
         setLoading(true);
         try {
+            const refreshToken = localStorage.getItem('fitbit_refresh_token');
             const response = await axios.get(`http://localhost:3000/api/activity-history`, {
-                params: { date, range, type: metricType },
+                params: { date, range, type: metricType, refresh: refreshToken },
                 headers: { Authorization: `Bearer ${token}` }
             });
             setData(response.data);
