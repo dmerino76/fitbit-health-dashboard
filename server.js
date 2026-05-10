@@ -28,6 +28,11 @@ db.serialize(() => {
     date TEXT PRIMARY KEY,
     json_data TEXT
   )`);
+  db.run(`CREATE TABLE IF NOT EXISTS health_data_cache (
+    date TEXT PRIMARY KEY,
+    data TEXT,
+    created_at INTEGER
+  )`);
 });
 
 // Helper to generate date array
@@ -278,6 +283,20 @@ app.get('/api/health-data', async (req, res) => {
   try {
     const headers = { 'Authorization': `Bearer ${token}` };
     const today = req.query.date || new Date().toISOString().split('T')[0];
+    const isToday = today === new Date().toISOString().split('T')[0];
+
+    // Check cache for non-today dates
+    if (!isToday) {
+      const cached = await new Promise((resolve) => {
+        db.get("SELECT data FROM health_data_cache WHERE date = ?", [today], (err, row) => {
+          resolve(row);
+        });
+      });
+      if (cached) {
+        console.log(`[API-CACHE] Health data hit for ${today}`);
+        return res.json(JSON.parse(cached.data));
+      }
+    }
 
     console.log(`[API-FETCH] Full Health Data for ${today}`);
 
@@ -289,7 +308,7 @@ app.get('/api/health-data', async (req, res) => {
       } catch (err) {
         const errorDetail = err.response?.data?.errors?.[0]?.message || err.response?.data || err.message;
         console.error(`[API-ERROR] Fetch failed for ${url}:`, errorDetail);
-        return null; // Return null if endpoint fails
+        return null;
       }
     };
 
@@ -314,7 +333,7 @@ app.get('/api/health-data', async (req, res) => {
       safeFetch(`https://api.fitbit.com/1/user/-/foods/log/water/date/${today}.json`)
     ]);
 
-    res.json({
+    const result = {
       profile: profile?.user || null,
       activity: activity || null,
       heartRate: heart ? heart['activities-heart'] : null,
@@ -326,7 +345,17 @@ app.get('/api/health-data', async (req, res) => {
       },
       body: body || null,
       devices: devices || null
-    });
+    };
+
+    // Cache the result for past dates
+    if (!isToday) {
+      db.run(
+        "INSERT OR REPLACE INTO health_data_cache (date, data, created_at) VALUES (?, ?, ?)",
+        [today, JSON.stringify(result), Math.floor(Date.now() / 1000)]
+      );
+    }
+
+    res.json(result);
 
   } catch (error) {
     const errorDetail = error.response?.data?.errors?.[0]?.message || error.response?.data || error.message;
