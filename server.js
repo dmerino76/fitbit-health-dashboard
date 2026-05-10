@@ -649,10 +649,10 @@ async function cacheHistoricalData() {
       date.setDate(date.getDate() - i);
       const dateStr = date.toISOString().split('T')[0];
 
-      // Check if already cached with data (skip if has both cache and daily_summary entries)
+      // Check if already cached (skip if in health_data_cache)
       const cached = await new Promise((resolve) => {
         db.get(
-          'SELECT h.date FROM health_data_cache h JOIN daily_summary d ON h.date = d.date WHERE h.date = ? AND (d.steps > 0 OR d.sleep_minutes > 0 OR d.resting_hr > 0)',
+          'SELECT date FROM health_data_cache WHERE date = ?',
           [dateStr],
           (err, row) => resolve(row)
         );
