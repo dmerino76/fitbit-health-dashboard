@@ -244,7 +244,9 @@ app.get('/api/activity-history', async (req, res) => {
     const upserts = [];
 
     if (type === 'sleep') {
-      // Sleep uses sessions endpoint
+      // Sleep uses sessions endpoint or fallback to cached data
+      let sleepMap = {};
+
       try {
         const sleepResponse = await axios.get(
           'https://www.googleapis.com/fitness/v1/users/me/sessions',
@@ -257,7 +259,6 @@ app.get('/api/activity-history', async (req, res) => {
           }
         );
 
-        const sleepMap = {};
         sleepResponse.data.session?.forEach(session => {
           if (session.activityType === 72) { // Sleep activity
             const sessionDate = new Date(session.startTimeMillis).toISOString().split('T')[0];
@@ -266,19 +267,29 @@ app.get('/api/activity-history', async (req, res) => {
           }
         });
 
-        dateList.forEach(d => {
-          const val = sleepMap[d] || 0;
-          result.push({ label: d.slice(range === 'week' ? 5 : 8), value: val });
-          upserts.push({ date: d, value: val });
-        });
+        console.log('[ActivityHistory] Sleep data fetched from Google Fit');
       } catch (sleepErr) {
-        console.warn('[ActivityHistory] Sleep data unavailable (user may not have sleep data synced):', sleepErr.response?.data?.error?.message || sleepErr.message);
-        // Return 0 for all dates if sleep data unavailable
-        dateList.forEach(d => {
-          result.push({ label: d.slice(range === 'week' ? 5 : 8), value: 0 });
-          upserts.push({ date: d, value: 0 });
+        console.warn('[ActivityHistory] Sleep API unavailable, using cached database data:', sleepErr.response?.data?.error?.message || sleepErr.message);
+
+        // Fallback: Read from database cache
+        const cachedSleep = await new Promise((resolve) => {
+          db.all(
+            `SELECT date, sleep_minutes as val FROM daily_summary WHERE date IN (${dateList.map(() => '?').join(',')})`,
+            dateList,
+            (err, rows) => resolve(rows || [])
+          );
+        });
+
+        cachedSleep.forEach(row => {
+          if (row.val) sleepMap[row.date] = row.val;
         });
       }
+
+      dateList.forEach(d => {
+        const val = sleepMap[d] || 0;
+        result.push({ label: d.slice(range === 'week' ? 5 : 8), value: val });
+        upserts.push({ date: d, value: val });
+      });
     } else {
       // Other metrics use aggregate
       const aggregateResponse = await axios.post(
