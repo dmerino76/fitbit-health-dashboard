@@ -1,0 +1,32 @@
+{
+  "name": "fitbit-health-dashboard",
+  "version": "1.0.0",
+  "description": "A web application to collect and display personal health data from Fitbit",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "debug": "node --inspect server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "fitbit",
+    "health",
+    "dashboard",
+    "web-application"
+  ],
+  "author": "Fitbit Health Dashboard Team",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.13.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "helmet": "^7.0.0",
+    "morgan": "^1.10.0",
+    "sqlite3": "^6.0.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}

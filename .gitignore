@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# IDE and editor
+.vscode/
+.claude/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Database files
+*.db
+*.db_
+
+# Logs
+debug.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build outputs
+dist/
+build/
+.next/
+
+# Cache
+.cache/
+.turbo/
+.eslintcache

@@ -1,0 +1,8 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-fitbit-dark text-white;
+  font-family: 'Inter', sans-serif;
+}
