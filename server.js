@@ -306,17 +306,32 @@ app.get('/api/activity-history', async (req, res) => {
         upserts.push({ date: d, value: val });
       });
     } else {
-      // Other metrics use aggregate
-      const aggregateResponse = await axios.post(
-        'https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate',
-        {
-          aggregateBy: [{ dataTypeName }],
-          bucketByTime: { durationMillis: 86400000 },
-          startTimeMillis: dayStart(dateList[0]),
-          endTimeMillis: dayEnd(dateList[dateList.length - 1])
-        },
-        { headers }
-      );
+      // Other metrics use aggregate with rate limit retry
+      let aggregateResponse = null;
+      try {
+        aggregateResponse = await axios.post(
+          'https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate',
+          {
+            aggregateBy: [{ dataTypeName }],
+            bucketByTime: { durationMillis: 86400000 },
+            startTimeMillis: dayStart(dateList[0]),
+            endTimeMillis: dayEnd(dateList[dateList.length - 1])
+          },
+          { headers }
+        );
+      } catch (err) {
+        if (err.response?.status === 429) {
+          console.warn(`[ActivityHistory] Rate limited (429), using cached database data for ${type}`);
+          // Fall back to database cache on rate limit
+          dateList.forEach(d => {
+            const val = dbMap[d] || 0;
+            result.push({ label: d.slice(range === 'week' ? 5 : 8), value: val });
+            upserts.push({ date: d, value: val });
+          });
+          return res.json(result);
+        }
+        throw err;
+      }
 
       const valueMap = {};
       aggregateResponse.data?.bucket?.forEach((bucket, idx) => {
@@ -600,8 +615,36 @@ async function cacheHistoricalData() {
     const daysAgo = 90;
     const promises = [];
 
-    // Generate list of dates to cache (last 90 days)
-    for (let i = 0; i < daysAgo; i++) {
+    // Helper with exponential backoff for rate limit handling
+    const aggregateWithRetry = async (dataTypeName, dateStr, maxRetries = 2) => {
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          const response = await axios.post(
+            'https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate',
+            {
+              aggregateBy: [{ dataTypeName }],
+              bucketByTime: { durationMillis: 86400000 },
+              startTimeMillis: dayStart(dateStr),
+              endTimeMillis: dayEnd(dateStr),
+            },
+            { headers, timeout: 10000 }
+          );
+          return response.data;
+        } catch (err) {
+          if (err.response?.status === 429 && attempt < maxRetries) {
+            // Rate limited, wait before retrying
+            const backoffMs = 2000 * Math.pow(2, attempt);
+            await new Promise(resolve => setTimeout(resolve, backoffMs));
+            continue;
+          }
+          return null;
+        }
+      }
+    };
+
+    // Generate list of dates to cache (last 30 days only to avoid rate limits)
+    const cacheDaysCount = 30;
+    for (let i = 1; i <= cacheDaysCount; i++) {
       const date = new Date(today);
       date.setDate(date.getDate() - i);
       const dateStr = date.toISOString().split('T')[0];
@@ -616,107 +659,76 @@ async function cacheHistoricalData() {
       });
 
       if (cached) {
-        continue; // Skip if recently cached
+        continue;
       }
 
-      // Fetch data for this date
-      const promise = (async () => {
+      // Fetch data for this date (sequential, not parallel, to respect rate limits)
+      try {
+        const stepsData = await aggregateWithRetry('com.google.step_count.delta', dateStr);
+        const heartData = await aggregateWithRetry('com.google.heart_rate.bpm', dateStr);
+        const weightData = await aggregateWithRetry('com.google.weight', dateStr);
+        const caloriesData = await aggregateWithRetry('com.google.calories.expended', dateStr);
+        const distanceData = await aggregateWithRetry('com.google.distance.delta', dateStr);
+        const waterData = await aggregateWithRetry('com.google.hydration', dateStr);
+
+        // Sleep data from sessions
+        let sleepData = { session: [] };
         try {
-          const aggregate = async (dataTypeName) => {
-            try {
-              const response = await axios.post(
-                'https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate',
-                {
-                  aggregateBy: [{ dataTypeName }],
-                  bucketByTime: { durationMillis: 86400000 },
-                  startTimeMillis: dayStart(dateStr),
-                  endTimeMillis: dayEnd(dateStr),
-                },
-                { headers, timeout: 10000 }
-              );
-              return response.data;
-            } catch (err) {
-              return null;
+          const sleepResponse = await axios.get(
+            'https://www.googleapis.com/fitness/v1/users/me/sessions',
+            {
+              params: {
+                startTime: Math.floor(dayStart(dateStr)),
+                endTime: Math.floor(dayEnd(dateStr))
+              },
+              headers,
+              timeout: 10000
             }
-          };
-
-          const [stepsData, caloriesData, distanceData, activeMinutesData, heartData, weightData, waterData, nutritionData] = await Promise.all([
-            aggregate('com.google.step_count.delta'),
-            aggregate('com.google.calories.expended'),
-            aggregate('com.google.distance.delta'),
-            aggregate('com.google.active_minutes'),
-            aggregate('com.google.heart_rate.bpm'),
-            aggregate('com.google.weight'),
-            aggregate('com.google.hydration'),
-            aggregate('com.google.nutrition')
-          ]);
-
-          // Sleep data from sessions
-          let sleepData = { session: [] };
-          try {
-            const sleepResponse = await axios.get(
-              'https://www.googleapis.com/fitness/v1/users/me/sessions',
-              {
-                params: {
-                  startTime: Math.floor(dayStart(dateStr)),
-                  endTime: Math.floor(dayEnd(dateStr))
-                },
-                headers,
-                timeout: 10000
-              }
-            );
-            sleepData = sleepResponse.data;
-          } catch (err) {
-            // Silently fail for sleep data
-          }
-
-          const result = fitGoogleToFitbitShape({
-            steps: stepsData,
-            calories: caloriesData,
-            distance: distanceData,
-            activeMinutes: activeMinutesData,
-            heart: heartData,
-            weight: weightData,
-            water: waterData,
-            nutrition: nutritionData,
-            sleep: sleepData
-          });
-
-          // Cache to database
-          db.run(
-            "INSERT OR REPLACE INTO health_data_cache (date, data, created_at) VALUES (?, ?, ?)",
-            [dateStr, JSON.stringify(result), Math.floor(Date.now() / 1000)]
           );
-
-          // Also update daily_summary with key metrics
-          db.run(
-            `INSERT OR IGNORE INTO daily_summary (date) VALUES (?)`,
-            [dateStr]
-          );
-
-          const steps = result.activity?.summary?.steps || 0;
-          const sleepMins = result.sleepSummary?.totalMinutesAsleep || 0;
-          const hr = result.heartRate?.[0]?.value?.restingHeartRate || 0;
-          const weight = result.body || 0;
-
-          if (steps > 0 || sleepMins > 0 || hr > 0 || weight > 0) {
-            db.run(
-              `UPDATE daily_summary SET steps = ?, sleep_minutes = ?, resting_hr = ?, weight = ? WHERE date = ?`,
-              [steps, sleepMins, hr, weight, dateStr]
-            );
-          }
+          sleepData = sleepResponse.data;
         } catch (err) {
-          console.error(`[CACHE] Error fetching ${dateStr}:`, err.message);
+          // Silently fail for sleep data
         }
-      })();
 
-      promises.push(promise);
+        const result = fitGoogleToFitbitShape({
+          steps: stepsData,
+          calories: caloriesData,
+          distance: distanceData,
+          activeMinutes: null,
+          heart: heartData,
+          weight: weightData,
+          water: waterData,
+          nutrition: null,
+          sleep: sleepData
+        });
 
-      // Batch requests in groups of 5 to avoid rate limiting
-      if (promises.length >= 5) {
-        await Promise.all(promises);
-        promises.length = 0;
-        await new Promise(resolve => setTimeout(resolve, 500)); // Small delay between batches
+        // Cache to database
+        db.run(
+          "INSERT OR REPLACE INTO health_data_cache (date, data, created_at) VALUES (?, ?, ?)",
+          [dateStr, JSON.stringify(result), Math.floor(Date.now() / 1000)]
+        );
+
+        // Also update daily_summary with key metrics
+        db.run(`INSERT OR IGNORE INTO daily_summary (date) VALUES (?)`, [dateStr]);
+
+        const steps = result.activity?.summary?.steps || 0;
+        const sleepMins = result.sleepSummary?.totalMinutesAsleep || 0;
+        const hr = result.heartRate?.[0]?.value?.restingHeartRate || 0;
+        const weight = result.body || 0;
+
+        if (steps > 0 || sleepMins > 0 || hr > 0 || weight > 0) {
+          db.run(
+            `UPDATE daily_summary SET steps = ?, sleep_minutes = ?, resting_hr = ?, weight = ? WHERE date = ?`,
+            [steps, sleepMins, hr, weight, dateStr]
+          );
+        }
+
+        console.log(`[CACHE] Cached ${dateStr}`);
+
+        // Longer delay between dates to respect rate limits
+        await new Promise(resolve => setTimeout(resolve, 1500));
+      } catch (err) {
+        console.error(`[CACHE] Error fetching ${dateStr}:`, err.message);
       }
     }
 
