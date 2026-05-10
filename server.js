@@ -642,8 +642,10 @@ async function cacheHistoricalData() {
       }
     };
 
-    // Generate list of dates to cache (last 90 days)
-    const cacheDaysCount = 90;
+    // Generate list of dates to cache (from January 1st to today)
+    const currentYear = today.getFullYear();
+    const yearStart = new Date(currentYear, 0, 1); // January 1st of current year
+    const cacheDaysCount = Math.ceil((today - yearStart) / (1000 * 60 * 60 * 24)) + 1;
     for (let i = 1; i <= cacheDaysCount; i++) {
       const date = new Date(today);
       date.setDate(date.getDate() - i);
