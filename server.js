@@ -642,18 +642,18 @@ async function cacheHistoricalData() {
       }
     };
 
-    // Generate list of dates to cache (last 30 days only to avoid rate limits)
-    const cacheDaysCount = 30;
+    // Generate list of dates to cache (last 90 days)
+    const cacheDaysCount = 90;
     for (let i = 1; i <= cacheDaysCount; i++) {
       const date = new Date(today);
       date.setDate(date.getDate() - i);
       const dateStr = date.toISOString().split('T')[0];
 
-      // Check if already cached (skip if cached within last 7 days)
+      // Check if already cached with data (skip if has both cache and daily_summary entries)
       const cached = await new Promise((resolve) => {
         db.get(
-          'SELECT created_at FROM health_data_cache WHERE date = ? AND created_at > ?',
-          [dateStr, Math.floor(Date.now() / 1000) - 7 * 86400],
+          'SELECT h.date FROM health_data_cache h JOIN daily_summary d ON h.date = d.date WHERE h.date = ? AND (d.steps > 0 OR d.sleep_minutes > 0 OR d.resting_hr > 0)',
+          [dateStr],
           (err, row) => resolve(row)
         );
       });
