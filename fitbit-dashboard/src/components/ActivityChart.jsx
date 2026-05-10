@@ -6,7 +6,7 @@ import {
 } from 'recharts';
 import { Activity } from 'lucide-react';
 
-const ActivityChart = ({ token, date, title = "Activity Trends", icon: Icon = Activity, metricType = 'steps', unit = 'steps', color = 'cyan' }) => {
+const ActivityChart = ({ token, date, title = "Activity Trends", icon: Icon = Activity, metricType = 'steps', unit = 'steps', color = 'cyan', isDarkMode = true }) => {
     const [range, setRange] = useState('week'); // 'day', 'week', 'month'
     const [data, setData] = useState([]);
     const [loading, setLoading] = useState(false);
@@ -58,10 +58,10 @@ const ActivityChart = ({ token, date, title = "Activity Trends", icon: Icon = Ac
     };
 
     return (
-        <div className="p-6 rounded-xl border border-white/5 bg-gray-900">
+        <div className={`p-6 rounded-xl border ${isDarkMode ? 'bg-gray-900 border-white/5' : 'bg-white border-slate-200'}`}>
             <div className="flex flex-col sm:flex-row justify-between items-center mb-6 gap-4">
                 <div>
-                    <h3 className="text-sm font-bold flex items-center gap-2 text-white">
+                    <h3 className={`text-sm font-bold flex items-center gap-2 ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
                         <Icon className="w-4 h-4" style={{ color: theme.stroke }} />
                         {title}
                     </h3>

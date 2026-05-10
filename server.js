@@ -401,7 +401,7 @@ app.get('/api/health-data', async (req, res) => {
       }
     };
 
-    // Fetch aggregates in parallel
+    // Fetch aggregates in parallel (only supported data types)
     const [
       stepsData,
       caloriesData,
@@ -421,8 +421,6 @@ app.get('/api/health-data', async (req, res) => {
       aggregate('com.google.hydration'),
       aggregate('com.google.nutrition')
     ]);
-
-    console.log('[API-FETCH] Steps raw data:', JSON.stringify(stepsData, null, 2).substring(0, 500));
 
     // Sleep data uses sessions endpoint
     let sleepData = { session: [] };
@@ -474,16 +472,6 @@ app.get('/api/health-data', async (req, res) => {
 
 // Response shape adapter: Google Fit → Fitbit format
 function fitGoogleToFitbitShape(googleData) {
-  console.log('[ADAPTER] Google Fit response structure:', JSON.stringify({
-    steps: googleData.steps?.bucket?.length,
-    calories: googleData.calories?.bucket?.length,
-    distance: googleData.distance?.bucket?.length,
-    activeMinutes: googleData.activeMinutes?.bucket?.length,
-    heart: googleData.heart?.bucket?.length,
-    weight: googleData.weight?.bucket?.length,
-    water: googleData.water?.bucket?.length,
-  }));
-
   const extractValue = (data, index = 0) => {
     if (!data || !data.bucket || !data.bucket[index] || !data.bucket[index].dataset || !data.bucket[index].dataset[0]) {
       return null;
@@ -493,6 +481,7 @@ function fitGoogleToFitbitShape(googleData) {
     return points[0].value;
   };
 
+  // Core metrics (supported by Google Fit)
   const stepsValue = extractValue(googleData.steps)?.[0]?.intVal || 0;
   const caloriesValue = extractValue(googleData.calories)?.[0]?.fpVal || 0;
   const distanceMeters = extractValue(googleData.distance)?.[0]?.fpVal || 0;
@@ -525,7 +514,7 @@ function fitGoogleToFitbitShape(googleData) {
   }
 
   return {
-    profile: null, // Google Fit limited profile data; could enhance with People API
+    profile: null,
     activity: {
       summary: {
         steps: stepsValue,
@@ -551,7 +540,7 @@ function fitGoogleToFitbitShape(googleData) {
       water: { summary: { water: Math.round(waterMl) } }
     },
     body: null,
-    devices: null // Google Fit has no device endpoint; replaced with data sources in UI
+    devices: null
   };
 }
 

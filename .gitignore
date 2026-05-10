@@ -33,3 +33,5 @@ build/
 .cache/
 .turbo/
 .eslintcache
+auth
+client_secret_788155392044-m2n57cl3dpkbpv0schp8nsko64aavr7q.apps.googleusercontent.com.json
