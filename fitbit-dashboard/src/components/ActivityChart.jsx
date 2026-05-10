@@ -57,23 +57,23 @@ const ActivityChart = ({ token, date, title = "Activity Trends", icon: Icon = Ac
     };
 
     return (
-        <div className="p-6 rounded-2xl border border-gray-800 bg-gray-900/50 backdrop-blur-sm">
+        <div className="p-6 rounded-xl border border-white/5 bg-gray-900">
             <div className="flex flex-col sm:flex-row justify-between items-center mb-6 gap-4">
                 <div>
-                    <h3 className="text-lg font-bold flex items-center gap-2">
-                        <Icon className="w-5 h-5" style={{ color: theme.stroke }} />
+                    <h3 className="text-sm font-bold flex items-center gap-2 text-white">
+                        <Icon className="w-4 h-4" style={{ color: theme.stroke }} />
                         {title}
                     </h3>
                 </div>
 
-                <div className="flex bg-gray-800 p-1 rounded-lg">
+                <div className="flex gap-1">
                     {['day', 'week', 'month'].map((r) => (
                         <button
                             key={r}
                             onClick={() => setRange(r)}
-                            className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors capitalize ${range === r
-                                ? `bg-gray-700 text-white shadow-sm ring-1 ring-inset ring-gray-600`
-                                : 'text-gray-400 hover:text-white hover:bg-gray-700'
+                            className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors capitalize ${range === r
+                                ? `text-white border-b-2 border-blue-500`
+                                : 'text-gray-500 hover:text-gray-300'
                                 }`}
                         >
                             {r}
