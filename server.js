@@ -34,6 +34,11 @@ db.serialize(() => {
     data TEXT,
     created_at INTEGER
   )`);
+  db.run(`CREATE TABLE IF NOT EXISTS user_tokens (
+    user_id TEXT PRIMARY KEY,
+    refresh_token TEXT,
+    updated_at INTEGER
+  )`);
 });
 
 // Google OAuth2 Setup
@@ -99,6 +104,16 @@ app.get('/auth/google/callback', async (req, res) => {
   try {
     const { tokens } = await oauth2Client.getToken(code);
     const { access_token, refresh_token } = tokens;
+
+    // Store refresh token for automatic historical caching
+    db.run(
+      'INSERT OR REPLACE INTO user_tokens (user_id, refresh_token, updated_at) VALUES (?, ?, ?)',
+      ['default_user', refresh_token, Math.floor(Date.now() / 1000)],
+      (err) => {
+        if (err) console.error('[AUTH] Failed to store refresh token:', err);
+        else console.log('[AUTH] Refresh token stored for automatic caching');
+      }
+    );
 
     res.redirect(`http://localhost:5173/dashboard?token=${access_token}&refresh=${refresh_token}`);
   } catch (error) {
@@ -555,9 +570,175 @@ function fitGoogleToFitbitShape(googleData) {
   };
 }
 
+// Historical data caching function
+async function cacheHistoricalData() {
+  try {
+    // Get stored refresh token
+    const userToken = await new Promise((resolve) => {
+      db.get('SELECT refresh_token FROM user_tokens LIMIT 1', (err, row) => {
+        resolve(row);
+      });
+    });
+
+    if (!userToken || !userToken.refresh_token) {
+      console.log('[CACHE] No stored refresh token found. Historical caching will run after first login.');
+      return;
+    }
+
+    console.log('[CACHE] Starting historical data fetch (last 90 days)...');
+
+    let accessToken;
+    try {
+      accessToken = await getValidToken(userToken.refresh_token, userToken.refresh_token);
+    } catch (err) {
+      console.warn('[CACHE] Token refresh failed, skipping historical cache');
+      return;
+    }
+
+    const headers = { 'Authorization': `Bearer ${accessToken}` };
+    const today = new Date();
+    const daysAgo = 90;
+    const promises = [];
+
+    // Generate list of dates to cache (last 90 days)
+    for (let i = 0; i < daysAgo; i++) {
+      const date = new Date(today);
+      date.setDate(date.getDate() - i);
+      const dateStr = date.toISOString().split('T')[0];
+
+      // Check if already cached (skip if cached within last 7 days)
+      const cached = await new Promise((resolve) => {
+        db.get(
+          'SELECT created_at FROM health_data_cache WHERE date = ? AND created_at > ?',
+          [dateStr, Math.floor(Date.now() / 1000) - 7 * 86400],
+          (err, row) => resolve(row)
+        );
+      });
+
+      if (cached) {
+        continue; // Skip if recently cached
+      }
+
+      // Fetch data for this date
+      const promise = (async () => {
+        try {
+          const aggregate = async (dataTypeName) => {
+            try {
+              const response = await axios.post(
+                'https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate',
+                {
+                  aggregateBy: [{ dataTypeName }],
+                  bucketByTime: { durationMillis: 86400000 },
+                  startTimeMillis: dayStart(dateStr),
+                  endTimeMillis: dayEnd(dateStr),
+                },
+                { headers, timeout: 10000 }
+              );
+              return response.data;
+            } catch (err) {
+              return null;
+            }
+          };
+
+          const [stepsData, caloriesData, distanceData, activeMinutesData, heartData, weightData, waterData, nutritionData] = await Promise.all([
+            aggregate('com.google.step_count.delta'),
+            aggregate('com.google.calories.expended'),
+            aggregate('com.google.distance.delta'),
+            aggregate('com.google.active_minutes'),
+            aggregate('com.google.heart_rate.bpm'),
+            aggregate('com.google.weight'),
+            aggregate('com.google.hydration'),
+            aggregate('com.google.nutrition')
+          ]);
+
+          // Sleep data from sessions
+          let sleepData = { session: [] };
+          try {
+            const sleepResponse = await axios.get(
+              'https://www.googleapis.com/fitness/v1/users/me/sessions',
+              {
+                params: {
+                  startTime: Math.floor(dayStart(dateStr)),
+                  endTime: Math.floor(dayEnd(dateStr))
+                },
+                headers,
+                timeout: 10000
+              }
+            );
+            sleepData = sleepResponse.data;
+          } catch (err) {
+            // Silently fail for sleep data
+          }
+
+          const result = fitGoogleToFitbitShape({
+            steps: stepsData,
+            calories: caloriesData,
+            distance: distanceData,
+            activeMinutes: activeMinutesData,
+            heart: heartData,
+            weight: weightData,
+            water: waterData,
+            nutrition: nutritionData,
+            sleep: sleepData
+          });
+
+          // Cache to database
+          db.run(
+            "INSERT OR REPLACE INTO health_data_cache (date, data, created_at) VALUES (?, ?, ?)",
+            [dateStr, JSON.stringify(result), Math.floor(Date.now() / 1000)]
+          );
+
+          // Also update daily_summary with key metrics
+          db.run(
+            `INSERT OR IGNORE INTO daily_summary (date) VALUES (?)`,
+            [dateStr]
+          );
+
+          const steps = result.activity?.summary?.steps || 0;
+          const sleepMins = result.sleepSummary?.totalMinutesAsleep || 0;
+          const hr = result.heartRate?.[0]?.value?.restingHeartRate || 0;
+          const weight = result.body || 0;
+
+          if (steps > 0 || sleepMins > 0 || hr > 0 || weight > 0) {
+            db.run(
+              `UPDATE daily_summary SET steps = ?, sleep_minutes = ?, resting_hr = ?, weight = ? WHERE date = ?`,
+              [steps, sleepMins, hr, weight, dateStr]
+            );
+          }
+        } catch (err) {
+          console.error(`[CACHE] Error fetching ${dateStr}:`, err.message);
+        }
+      })();
+
+      promises.push(promise);
+
+      // Batch requests in groups of 5 to avoid rate limiting
+      if (promises.length >= 5) {
+        await Promise.all(promises);
+        promises.length = 0;
+        await new Promise(resolve => setTimeout(resolve, 500)); // Small delay between batches
+      }
+    }
+
+    // Wait for remaining promises
+    if (promises.length > 0) {
+      await Promise.all(promises);
+    }
+
+    console.log('[CACHE] Historical data caching completed');
+  } catch (err) {
+    console.error('[CACHE] Historical caching failed:', err.message);
+  }
+}
+
 // Start server
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
+
+  // Start historical data caching in background (non-blocking)
+  setTimeout(() => {
+    cacheHistoricalData().catch(err => console.error('[CACHE] Error:', err));
+  }, 2000);
 });
 
 module.exports = app;
