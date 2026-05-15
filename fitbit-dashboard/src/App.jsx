@@ -236,21 +236,25 @@ function App() {
                                         <Moon className="w-4 h-4 text-purple-500" />
                                         Sleep architecture
                                     </h3>
-                                    {data.sleepSummary?.stages ? (
+                                    {data.sleepSummary?.totalMinutesAsleep > 0 ? (
                                         <div className="space-y-4">
                                             <div className={`p-3 border rounded-lg ${isDarkMode ? 'border-white/5' : 'border-slate-200'}`}>
                                                 <p className={`text-xs ${isDarkMode ? 'text-gray-400' : 'text-slate-600'}`}>Total</p>
                                                 <p className={`text-lg font-bold mt-1 ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>{(data.sleepSummary.totalMinutesAsleep / 60).toFixed(1)} <span className={`text-xs ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>hrs</span></p>
                                             </div>
-                                            <div className="grid grid-cols-2 gap-2">
-                                                <StageBox label="Deep" value={data.sleepSummary.stages.deep} color="#7c3aed" isDarkMode={isDarkMode} />
-                                                <StageBox label="REM" value={data.sleepSummary.stages.rem} color="#a855f7" isDarkMode={isDarkMode} />
-                                                <StageBox label="Light" value={data.sleepSummary.stages.light} color="#d8b4fe" isDarkMode={isDarkMode} />
-                                                <StageBox label="Awake" value={data.sleepSummary.stages.wake} color="#6b7280" isDarkMode={isDarkMode} />
-                                            </div>
+                                            {(data.sleepSummary.stages.deep + data.sleepSummary.stages.rem + data.sleepSummary.stages.light) > 0 ? (
+                                                <div className="grid grid-cols-2 gap-2">
+                                                    <StageBox label="Deep" value={data.sleepSummary.stages.deep} color="#7c3aed" isDarkMode={isDarkMode} />
+                                                    <StageBox label="REM" value={data.sleepSummary.stages.rem} color="#a855f7" isDarkMode={isDarkMode} />
+                                                    <StageBox label="Light" value={data.sleepSummary.stages.light} color="#d8b4fe" isDarkMode={isDarkMode} />
+                                                    <StageBox label="Awake" value={data.sleepSummary.stages.wake} color="#6b7280" isDarkMode={isDarkMode} />
+                                                </div>
+                                            ) : (
+                                                <p className={`text-xs ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Stage breakdown not available for this device</p>
+                                            )}
                                         </div>
                                     ) : (
-                                        <p className={`text-xs ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>No data available</p>
+                                        <p className={`text-xs ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>No sleep data recorded</p>
                                     )}
                                 </div>
 

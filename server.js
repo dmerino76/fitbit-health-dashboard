@@ -143,6 +143,7 @@ const getValidToken = async (accessToken, refreshToken) => {
 // Helper to convert date string to epoch milliseconds
 const dayStart = (dateStr) => new Date(dateStr + 'T00:00:00').getTime();
 const dayEnd = (dateStr) => new Date(dateStr + 'T23:59:59').getTime();
+const toRFC3339 = (ms) => new Date(ms).toISOString();
 
 // Activity history endpoint (charts: day/week/month views)
 app.get('/api/activity-history', async (req, res) => {
@@ -267,16 +268,16 @@ app.get('/api/activity-history', async (req, res) => {
           'https://www.googleapis.com/fitness/v1/users/me/sessions',
           {
             params: {
-              startTime: Math.floor(dayStart(dateList[0])),
-              endTime: Math.floor(dayEnd(dateList[dateList.length - 1]))
+              startTime: toRFC3339(dayStart(dateList[0])),
+              endTime: toRFC3339(dayEnd(dateList[dateList.length - 1]))
             },
             headers
           }
         );
 
         sleepResponse.data.session?.forEach(session => {
-          if (session.activityType === 72) { // Sleep activity
-            const sessionDate = new Date(session.startTimeMillis).toISOString().split('T')[0];
+          if (session.activityType === 72) { // parent sleep session = total duration
+            const sessionDate = new Date(parseInt(session.startTimeMillis)).toISOString().split('T')[0];
             const minutes = Math.round((session.endTimeMillis - session.startTimeMillis) / 60000);
             sleepMap[sessionDate] = (sleepMap[sessionDate] || 0) + minutes;
           }
@@ -470,8 +471,8 @@ app.get('/api/health-data', async (req, res) => {
         'https://www.googleapis.com/fitness/v1/users/me/sessions',
         {
           params: {
-            startTime: Math.floor(dayStart(today)),
-            endTime: Math.floor(dayEnd(today))
+            startTime: toRFC3339(dayStart(today)),
+            endTime: toRFC3339(dayEnd(today))
           },
           headers
         }
@@ -548,8 +549,13 @@ function fitGoogleToFitbitShape(googleData) {
   let sleepStages = { deep: 0, rem: 0, light: 0, wake: 0 };
   if (googleData.sleep && googleData.sleep.session) {
     googleData.sleep.session.forEach(session => {
-      if (session.activityType === 72) { // Sleep activity type
-        sleepTotal += Math.round((session.endTimeMillis - session.startTimeMillis) / 60000);
+      const minutes = Math.round((parseInt(session.endTimeMillis) - parseInt(session.startTimeMillis)) / 60000);
+      switch (session.activityType) {
+        case 72:  sleepTotal += minutes; break; // parent sleep session
+        case 109: sleepStages.light += minutes; break;
+        case 110: sleepStages.deep  += minutes; break;
+        case 111: sleepStages.rem   += minutes; break;
+        case 112: sleepStages.wake  += minutes; break;
       }
     });
   }
