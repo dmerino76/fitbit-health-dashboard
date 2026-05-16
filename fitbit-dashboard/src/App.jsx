@@ -205,10 +205,26 @@ function App() {
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                                 {/* Heart Zones */}
                                 <div className={`border rounded-lg p-6 ${isDarkMode ? 'bg-gray-900 border-white/5' : 'bg-white border-slate-200'}`}>
-                                    <h3 className={`text-sm font-medium mb-6 flex items-center gap-2 ${isDarkMode ? 'text-gray-400' : 'text-slate-600'}`}>
+                                    <h3 className={`text-sm font-medium mb-4 flex items-center gap-2 ${isDarkMode ? 'text-gray-400' : 'text-slate-600'}`}>
                                         <Heart className="w-4 h-4 text-red-500" />
                                         Heart zones
                                     </h3>
+                                    {/* Min / Avg / Max BPM row */}
+                                    <div className="grid grid-cols-3 gap-2 mb-6">
+                                        {[
+                                            { label: 'Min', value: data.heartRate?.[0]?.value?.minBpm },
+                                            { label: 'Avg', value: data.heartRate?.[0]?.value?.avgBpm },
+                                            { label: 'Max', value: data.heartRate?.[0]?.value?.maxBpm },
+                                        ].map(({ label, value }) => (
+                                            <div key={label} className={`rounded p-2 text-center ${isDarkMode ? 'bg-slate-800' : 'bg-slate-100'}`}>
+                                                <p className={`text-xs ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>{label}</p>
+                                                <p className={`text-base font-bold ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
+                                                    {value || '—'}
+                                                    {value ? <span className={`text-xs font-normal ml-0.5 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>bpm</span> : null}
+                                                </p>
+                                            </div>
+                                        ))}
+                                    </div>
                                     <div className="space-y-5">
                                         {data.heartRate?.[0]?.value?.heartRateZones?.map((zone, idx) => {
                                             const colors = ['#ef4444', '#f97316', '#eab308', '#06b6d4'];
