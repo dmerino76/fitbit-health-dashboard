@@ -192,10 +192,10 @@ function App() {
                         <section>
                             <h2 className={`text-lg font-bold mb-6 pb-4 border-b ${isDarkMode ? 'border-white/5' : 'border-slate-200'}`}>Performance trends</h2>
                             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                                <ActivityChart token={token} date={date} title="Steps" metricType="steps" unit="steps" color="cyan" icon={Footprints} isDarkMode={isDarkMode} />
-                                <ActivityChart token={token} date={date} title="Heart Rate" metricType="heart" unit="bpm" color="rose" icon={Heart} isDarkMode={isDarkMode} />
-                                <ActivityChart token={token} date={date} title="Sleep" metricType="sleep" unit="mins" color="violet" icon={Moon} isDarkMode={isDarkMode} />
-                                <ActivityChart token={token} date={date} title="Weight" metricType="weight" unit="kg" color="amber" icon={Scale} isDarkMode={isDarkMode} />
+                                <ActivityChart token={token} date={date} title="Steps" metricType="steps" unit="steps" color="cyan" icon={Footprints} isDarkMode={isDarkMode} onDateSelect={setDate} />
+                                <ActivityChart token={token} date={date} title="Heart Rate" metricType="heart" unit="bpm" color="rose" icon={Heart} isDarkMode={isDarkMode} onDateSelect={setDate} />
+                                <ActivityChart token={token} date={date} title="Sleep" metricType="sleep" unit="mins" color="violet" icon={Moon} isDarkMode={isDarkMode} onDateSelect={setDate} />
+                                <ActivityChart token={token} date={date} title="Weight" metricType="weight" unit="kg" color="amber" icon={Scale} isDarkMode={isDarkMode} onDateSelect={setDate} />
                             </div>
                         </section>
 

@@ -6,7 +6,7 @@ import {
 } from 'recharts';
 import { Activity } from 'lucide-react';
 
-const ActivityChart = ({ token, date, title = "Activity Trends", icon: Icon = Activity, metricType = 'steps', unit = 'steps', color = 'cyan', isDarkMode = true }) => {
+const ActivityChart = ({ token, date, title = "Activity Trends", icon: Icon = Activity, metricType = 'steps', unit = 'steps', color = 'cyan', isDarkMode = true, onDateSelect }) => {
     const [range, setRange] = useState('week'); // 'day', 'week', 'month'
     const [data, setData] = useState([]);
     const [loading, setLoading] = useState(false);
@@ -140,6 +140,8 @@ const ActivityChart = ({ token, date, title = "Activity Trends", icon: Icon = Ac
                                     fontSize={12}
                                     tickLine={false}
                                     axisLine={false}
+                                    onClick={(data) => onDateSelect?.(data.value)}
+                                    tick={{ cursor: onDateSelect ? 'pointer' : 'default' }}
                                 />
                                 <YAxis
                                     stroke="#9ca3af"
@@ -152,6 +154,8 @@ const ActivityChart = ({ token, date, title = "Activity Trends", icon: Icon = Ac
                                     dataKey="value"
                                     fill={theme.stroke}
                                     radius={[4, 4, 0, 0]}
+                                    onClick={(barData) => onDateSelect?.(barData.date)}
+                                    style={{ cursor: onDateSelect ? 'pointer' : 'default' }}
                                 />
                             </BarChart>
                         )}
