@@ -268,6 +268,21 @@ function App() {
                                             ) : (
                                                 <p className={`text-xs ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>Stage breakdown not available for this device</p>
                                             )}
+                                            {data.sleepSummary?.bedtime != null && (
+                                                <div className="grid grid-cols-2 gap-2 mt-2">
+                                                    {[
+                                                        { label: 'Bedtime', text: new Date(data.sleepSummary.bedtime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) },
+                                                        { label: 'Wake time', text: new Date(data.sleepSummary.wakeTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) },
+                                                        { label: 'In bed', text: `${(data.sleepSummary.inBedMinutes / 60).toFixed(1)} hrs` },
+                                                        { label: 'Efficiency', text: `${data.sleepSummary.efficiency}%` },
+                                                    ].map(({ label, text }) => (
+                                                        <div key={label} className={`border rounded-lg p-3 ${isDarkMode ? 'bg-gray-800 border-white/5' : 'bg-slate-50 border-slate-200'}`}>
+                                                            <p className={`text-xs mb-1 ${isDarkMode ? 'text-gray-400' : 'text-slate-500'}`}>{label}</p>
+                                                            <p className={`text-sm font-semibold ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>{text}</p>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
                                         </div>
                                     ) : (
                                         <p className={`text-xs ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`}>No sleep data recorded</p>

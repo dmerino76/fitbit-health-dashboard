@@ -39,6 +39,10 @@ db.serialize(() => {
     refresh_token TEXT,
     updated_at INTEGER
   )`);
+  db.run(`CREATE TABLE IF NOT EXISTS cache_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  )`);
 });
 
 // Google OAuth2 Setup
@@ -207,6 +211,45 @@ app.get('/api/activity-history', async (req, res) => {
         return res.json(result);
       } catch (err) {
         console.error(`[ActivityHistory] API ERROR (Intraday):`, err.response?.data || err.message);
+        return res.json([]);
+      }
+    }
+
+    // --- DAY VIEW: INTRADAY HEART RATE ---
+    if (range === 'day' && type === 'heart') {
+      const cached = await new Promise(resolve =>
+        db.get('SELECT data FROM health_data_cache WHERE date = ?', [targetDate], (_, row) => resolve(row))
+      );
+      if (cached?.data) {
+        try {
+          const parsed = JSON.parse(cached.data);
+          const intraday = parsed.heartRate?.[0]?.intraday ?? [];
+          if (intraday.length > 0) {
+            return res.json(intraday.map(p => ({ label: p.time, value: p.value })));
+          }
+        } catch (_) { /* fall through */ }
+      }
+      try {
+        const resp = await axios.post(
+          'https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate',
+          {
+            aggregateBy: [{ dataTypeName: 'com.google.heart_rate.bpm' }],
+            bucketByTime: { durationMillis: 900000 },
+            startTimeMillis: dayStart(targetDate),
+            endTimeMillis: dayEnd(targetDate),
+          },
+          { headers }
+        );
+        const points = [];
+        (resp.data.bucket ?? []).forEach(bucket => {
+          const bpmVal = bucket.dataset?.[0]?.point?.[0]?.value?.[0]?.fpVal;
+          if (!bpmVal) return;
+          const d = new Date(parseInt(bucket.startTimeMillis));
+          const label = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+          points.push({ label, value: Math.round(bpmVal) });
+        });
+        return res.json(points);
+      } catch (_) {
         return res.json([]);
       }
     }
@@ -651,6 +694,26 @@ function fitGoogleToFitbitShape(googleData) {
   sleepStages.deep  = Math.round(sleepStages.deep);
   sleepStages.rem   = Math.round(sleepStages.rem);
 
+  // Main sleep session (longest by duration) — drives bedtime/wake/efficiency
+  const sessions = googleData.sleep?.session ?? [];
+  const mainSession = sessions.length
+    ? sessions.reduce((a, b) =>
+        (parseInt(b.endTimeMillis) - parseInt(b.startTimeMillis)) >
+        (parseInt(a.endTimeMillis) - parseInt(a.startTimeMillis)) ? b : a
+      )
+    : null;
+  const bedtime = mainSession ? new Date(parseInt(mainSession.startTimeMillis)).toISOString() : null;
+  const wakeTime = mainSession ? new Date(parseInt(mainSession.endTimeMillis)).toISOString() : null;
+  const inBedMinutes = mainSession
+    ? Math.round((parseInt(mainSession.endTimeMillis) - parseInt(mainSession.startTimeMillis)) / 60000)
+    : null;
+  let efficiency = null;
+  if (inBedMinutes && inBedMinutes > 0) {
+    efficiency = Math.round((sleepStages.light + sleepStages.deep + sleepStages.rem) / inBedMinutes * 100);
+    if (efficiency > 100) efficiency = 100;
+    if (efficiency < 0) efficiency = 0;
+  }
+
   return {
     profile: null,
     activity: {
@@ -671,7 +734,11 @@ function fitGoogleToFitbitShape(googleData) {
     sleep: [],
     sleepSummary: {
       totalMinutesAsleep: sleepTotal,
-      stages: sleepStages
+      stages: sleepStages,
+      bedtime,
+      wakeTime,
+      inBedMinutes,
+      efficiency
     },
     nutrition: {
       food: { summary: { protein: 0, carbs: 0, fat: 0, calories: 0 } },
@@ -713,14 +780,14 @@ async function cacheHistoricalData() {
     const promises = [];
 
     // Helper with exponential backoff for rate limit handling
-    const aggregateWithRetry = async (dataTypeName, dateStr, maxRetries = 2) => {
+    const aggregateWithRetry = async (dataTypeName, dateStr, bucketDurationMs = 86400000, maxRetries = 2) => {
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
           const response = await axios.post(
             'https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate',
             {
               aggregateBy: [{ dataTypeName }],
-              bucketByTime: { durationMillis: 86400000 },
+              bucketByTime: { durationMillis: bucketDurationMs },
               startTimeMillis: dayStart(dateStr),
               endTimeMillis: dayEnd(dateStr),
             },
@@ -729,7 +796,31 @@ async function cacheHistoricalData() {
           return response.data;
         } catch (err) {
           if (err.response?.status === 429 && attempt < maxRetries) {
-            // Rate limited, wait before retrying
+            const backoffMs = 2000 * Math.pow(2, attempt);
+            await new Promise(resolve => setTimeout(resolve, backoffMs));
+            continue;
+          }
+          return null;
+        }
+      }
+    };
+
+    // Sleep segments fetch (no bucketByTime — each segment is its own point)
+    const fetchSleepSegmentsWithRetry = async (dateStr, maxRetries = 2) => {
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          const response = await axios.post(
+            'https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate',
+            {
+              aggregateBy: [{ dataTypeName: 'com.google.sleep.segment' }],
+              startTimeMillis: dayStart(dateStr),
+              endTimeMillis: dayEnd(dateStr),
+            },
+            { headers, timeout: 10000 }
+          );
+          return response.data;
+        } catch (err) {
+          if (err.response?.status === 429 && attempt < maxRetries) {
             const backoffMs = 2000 * Math.pow(2, attempt);
             await new Promise(resolve => setTimeout(resolve, backoffMs));
             continue;
@@ -765,10 +856,12 @@ async function cacheHistoricalData() {
       try {
         const stepsData = await aggregateWithRetry('com.google.step_count.delta', dateStr);
         const heartData = await aggregateWithRetry('com.google.heart_rate.bpm', dateStr);
+        const heartIntradayData = await aggregateWithRetry('com.google.heart_rate.bpm', dateStr, 900000);
         const weightData = await aggregateWithRetry('com.google.weight', dateStr);
         const caloriesData = await aggregateWithRetry('com.google.calories.expended', dateStr);
         const distanceData = await aggregateWithRetry('com.google.distance.delta', dateStr);
         const waterData = await aggregateWithRetry('com.google.hydration', dateStr);
+        const sleepSegmentsData = await fetchSleepSegmentsWithRetry(dateStr);
 
         // Sleep data from sessions
         let sleepData = { session: [] };
@@ -798,7 +891,9 @@ async function cacheHistoricalData() {
           weight: weightData,
           water: waterData,
           nutrition: null,
-          sleep: sleepData
+          sleep: sleepData,
+          sleepSegments: sleepSegmentsData,
+          heartIntraday: heartIntradayData
         });
 
         // Cache to database
@@ -846,9 +941,23 @@ async function cacheHistoricalData() {
 app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
 
-  // Start historical data caching in background (non-blocking)
+  // Schema v2 migration: wipe cache once if shape changed, then backfill
   setTimeout(() => {
-    cacheHistoricalData().catch(err => console.error('[CACHE] Error:', err));
+    db.get('SELECT value FROM cache_meta WHERE key = ?', ['health_data_schema'], (err, row) => {
+      if (!row || row.value !== 'v2') {
+        db.run('DELETE FROM health_data_cache', [], (delErr) => {
+          if (delErr) {
+            console.error('[CACHE] Migration failed:', delErr.message);
+            return;
+          }
+          console.log('[CACHE] Schema v2 migration: cleared health_data_cache for rebuild');
+          db.run(`INSERT OR REPLACE INTO cache_meta VALUES ('health_data_schema', 'v2')`);
+          cacheHistoricalData().catch(err => console.error('[CACHE] Error:', err));
+        });
+      } else {
+        cacheHistoricalData().catch(err => console.error('[CACHE] Error:', err));
+      }
+    });
   }, 2000);
 });
 
