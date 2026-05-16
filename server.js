@@ -43,6 +43,8 @@ db.serialize(() => {
     key TEXT PRIMARY KEY,
     value TEXT
   )`);
+  // Clear stale zero-sleep rows from daily_summary so trend chart re-fetches real values
+  db.run(`UPDATE daily_summary SET sleep_minutes = NULL WHERE sleep_minutes = 0`);
 });
 
 // Google OAuth2 Setup
@@ -896,11 +898,13 @@ async function cacheHistoricalData() {
           heartIntraday: heartIntradayData
         });
 
-        // Cache to database
-        db.run(
-          "INSERT OR REPLACE INTO health_data_cache (date, data, created_at) VALUES (?, ?, ?)",
-          [dateStr, JSON.stringify(result), Math.floor(Date.now() / 1000)]
-        );
+        // Cache to database — skip if sleep is missing to avoid re-poisoning the cache
+        if ((result.sleepSummary?.totalMinutesAsleep ?? 0) > 0) {
+          db.run(
+            "INSERT OR REPLACE INTO health_data_cache (date, data, created_at) VALUES (?, ?, ?)",
+            [dateStr, JSON.stringify(result), Math.floor(Date.now() / 1000)]
+          );
+        }
 
         // Also update daily_summary with key metrics
         db.run(`INSERT OR IGNORE INTO daily_summary (date) VALUES (?)`, [dateStr]);
@@ -913,7 +917,7 @@ async function cacheHistoricalData() {
         if (steps > 0 || sleepMins > 0 || hr > 0 || weight > 0) {
           db.run(
             `UPDATE daily_summary SET steps = ?, sleep_minutes = ?, resting_hr = ?, weight = ? WHERE date = ?`,
-            [steps, sleepMins, hr, weight, dateStr]
+            [steps, sleepMins || null, hr, weight, dateStr]
           );
         }
 
