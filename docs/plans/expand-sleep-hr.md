@@ -105,20 +105,177 @@ Pull from `health_data_cache` first; fall back to live aggregate on cache miss. 
 
 ## Issues
 
-Tracked as 10 GitHub Issues under the **Sleep & HR expansion** milestone on this repo. See the milestone for current status.
+Tracked as 5 GitHub Issues (vertical slices) under the **Sleep & HR expansion** milestone on this repo. Each issue is a full-stack slice — fetch → shape → route → UI — that can be demoed end-to-end before merging. See the milestone for current status.
 
-| # | Title | Labels | Depends on |
-|---|-------|--------|------------|
-| 1 | Sleep stages always render 0: switch to `com.google.sleep.segment` | bug, backend | — |
-| 2 | Fetch `com.google.sleep.segment` in `/api/health-data` | feature, backend | #1 |
-| 3 | Add bedtime/wake/in-bed/efficiency to `sleepSummary` | feature, backend | #1 |
-| 4 | Add daily HR min/max/avg + corrected resting HR | feature, backend | — |
-| 5 | Intraday HR (15-min) + real minutes-per-zone | feature, backend | — |
-| 6 | Mirror sleep/HR enrichments in `cacheHistoricalData` | feature, backend | #2, #5 |
-| 7 | One-shot cache invalidation + `cache_meta` table | feature, backend | #6 |
-| 8 | Day-view HR chart branch in `/api/activity-history` | feature, backend | #5 |
-| 9 | Sleep card: bedtime/wake/in-bed/efficiency UI | feature, frontend, ui | #3 |
-| 10 | Heart zones card: Min/Avg/Max BPM | feature, frontend, ui | #4 |
+### Dependency summary
+
+| # | Title | Depends on | Complexity | Labels |
+|---|-------|------------|------------|--------|
+| 1 | Sleep stage boxes show real minutes | none | M | `fix` `backend` |
+| 2 | Sleep card: bedtime / wake / in-bed / efficiency | #1 | M | `feature` `backend` `frontend` |
+| 3 | Heart card: real zone minutes + min/avg/max BPM | none | M | `feature` `backend` `frontend` |
+| 4 | HR chart "Day" view: 15-min intraday curve | #3 | S | `feature` `backend` |
+| 5 | Cache: auto-invalidate on deploy + backfill new shape | #1, #3 | M | `infra` `backend` `cache` |
+
+**Safe merge order:** #1 and #3 are independent — start both in parallel. #2 after #1. #4 after #3. #5 last.
+
+---
+
+### Issue #1 — Fix: sleep stage boxes show real deep/REM/light/awake minutes
+
+**Slice summary:** Engineer fetches `com.google.sleep.segment`, wires it into the shape transform, and demos the four stage boxes showing non-zero numbers on any date with sleep data — no other UI work needed.
+
+**Depends on:** none
+
+**Layers touched:** server fetch · data transform · HTTP response payload
+*(StageBoxes at `App.jsx:247-250` already consume `stages.*` correctly — no UI code change)*
+
+**What to build:**
+
+- In `/api/health-data` (`server.js:387`), add a custom inline dataset request alongside the existing `Promise.all` (`server.js:447-465`). Must NOT use `bucketByTime` — each sleep segment must come back as its own point:
+
+  ```js
+  const sleepSegmentsResp = await axios.post(
+    'https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate',
+    { aggregateBy: [{ dataTypeName: 'com.google.sleep.segment' }],
+      startTimeMillis: dayStart(today), endTimeMillis: dayEnd(today) },
+    { headers }
+  ).catch(() => null);
+  ```
+
+- Pass `sleepSegments: sleepSegmentsResp?.data` into `fitGoogleToFitbitShape` (`server.js:516`).
+
+- In `fitGoogleToFitbitShape`, replace the activityType stage loop (`server.js:551-561`) with a loop over `googleData.sleepSegments?.bucket?.[0]?.dataset?.[0]?.point ?? []`. Duration = `(endTimeNanos − startTimeNanos) / 60_000_000_000` min. intVal mapping: `1→wake`, `4→light`, `5→deep`, `6→rem` (skip 3=out-of-bed). `totalMinutesAsleep` still comes from the parent session (activityType=72, unchanged).
+
+**What NOT to build:** bedtime/wake/efficiency (→ #2); cache backfill (→ #5); no UI component changes.
+
+**Acceptance criteria:**
+- [ ] `curl .../api/health-data?date=<date-with-sleep> | jq '.sleepSummary.stages'` → at least one of `{deep,rem,light,wake}` non-zero.
+- [ ] Date with no sleep → `stages` all zero, no 500 error.
+- [ ] Segment fetch failure → endpoint returns 200, stages all zero (not crash).
+- [ ] `sleepSummary.totalMinutesAsleep` still populated from parent session.
+- [ ] StageBoxes in UI render (browse dashboard — no crash, boxes show real numbers).
+
+---
+
+### Issue #2 — Feature: sleep card shows bedtime, wake time, in-bed duration, and efficiency
+
+**Slice summary:** Engineer adds main-session logic to the shape transform and four new UI boxes to the Sleep card, and demos a date showing "Bedtime 11:30 PM · Wake 7:15 AM · In bed 7.8 hrs · Efficiency 87%" end-to-end.
+
+**Depends on:** #1 *(efficiency = (light+deep+rem) / inBedMinutes — needs real stage totals)*
+
+**Layers touched:** data transform · HTTP response payload · frontend component
+
+**What to build:**
+
+- In `fitGoogleToFitbitShape` (`server.js:516`), after the stage loop, find the main sleep session (longest by duration): `googleData.sleep.session?.reduce((a, b) => (b.endTimeMillis - b.startTimeMillis) > (a.endTimeMillis - a.startTimeMillis) ? b : a, googleData.sleep.session?.[0])`.
+
+- Compute: `bedtime` (ISO string from startTimeMillis), `wakeTime` (endTimeMillis), `inBedMinutes` (rounded duration), `efficiency` = `round((light+deep+rem) / inBedMinutes * 100)` guarded against divide-by-zero. All four are `null` when no sessions.
+
+- In `App.jsx`, after StageBoxes (`App.jsx:251`), add a 2×2 grid conditionally rendered only when `data.sleepSummary.bedtime != null`. Use a local `SleepMetaBox` component with the same `border rounded-lg p-3` pattern. Format bedtime/wake via `new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })`.
+
+**What NOT to build:** Heart card changes (→ #3); cache backfill (→ #5).
+
+**Acceptance criteria:**
+- [ ] `curl .../api/health-data?date=<date-with-sleep> | jq '.sleepSummary | {bedtime,wakeTime,inBedMinutes,efficiency}'` → all four non-null and plausible.
+- [ ] Efficiency is 0–100 (never >100, never negative).
+- [ ] Sleep card shows 2×2 grid with Bedtime/Wake/In bed/Efficiency on a date with sleep.
+- [ ] Date without sleep → 2×2 grid does NOT render (no "null" visible).
+- [ ] "No sleep data recorded" state (`App.jsx:256-258`) still appears on zero-sleep dates.
+- [ ] Stage boxes from #1 still show alongside the new boxes.
+
+---
+
+### Issue #3 — Feature: heart card shows real zone minutes, min/avg/max BPM, and corrected resting HR
+
+**Slice summary:** Engineer adds a 15-min intraday HR fetch, computes real zone minutes and daily aggregates, adds a Min/Avg/Max BPM row to the Heart card, and demos zone bars with real widths and the new stats row — all from one PR.
+
+**Depends on:** none *(resting HR uses daily min as fallback when no sleep window)*
+
+**Layers touched:** server fetch · data transform · HTTP response payload · frontend component
+
+**What to build:**
+
+- In `/api/health-data` (`server.js:387`), add a 15-min intraday HR fetch to `Promise.all`: `com.google.heart_rate.bpm` with `bucketByTime: { durationMillis: 900000 }`. Returns up to 96 buckets — non-empty ones become `heartRate[0].intraday = [{ time: 'HH:MM', value: avgBpm }]`.
+
+- From the intraday series, compute zone minutes: each non-empty bucket adds 15 to its zone using the existing `220 − 30` thresholds (`server.js:539-545`). Overwrites the zeros in `heartRateZones[i].minutes`.
+
+- From the existing `heartData` bucket, extract `minBpm`, `maxBpm`, `avgBpm`. Use `minBpm` as `restingHeartRate`. Add `{restingHeartRate, minBpm, maxBpm, avgBpm}` to `heartRate[0].value`.
+
+- In `App.jsx`, Heart zones card (`App.jsx:206-231`), insert a 3-column min/avg/max grid between the heading and the zone list. Zone bars need no code change — they already read `zone.minutes`.
+
+**What NOT to build:** Day-view HR chart route (→ #4); cache backfill (→ #5).
+
+**Acceptance criteria:**
+- [ ] `curl .../api/health-data?date=<today> | jq '.heartRate[0].value | {minBpm,avgBpm,maxBpm,restingHeartRate}'` → all non-zero on a day HR was tracked.
+- [ ] `jq '.heartRate[0].value.heartRateZones | map(.minutes)'` → at least one non-zero; sum ≈ tracked intervals × 15.
+- [ ] `jq '.heartRate[0].intraday | length'` → 1–96.
+- [ ] Heart card shows Min/Avg/Max row with real BPM values above zone bars.
+- [ ] Zone bars have non-zero widths on an active day.
+- [ ] Intraday fetch failure → 200 returned; `intraday: []`, zone minutes 0, min/avg/max 0.
+- [ ] Existing zone names/ranges (`Out of Zone`, `Fat Burn`, `Cardio`, `Peak`) still render correctly.
+
+---
+
+### Issue #4 — Feature: HR chart "Day" view renders a 15-min intraday curve
+
+**Slice summary:** Engineer adds a `range=day&type=heart` branch to `/api/activity-history` that reads the cached intraday series, and demos the "Day" button on the Heart Rate chart rendering a smooth curve instead of a single bar.
+
+**Depends on:** #3 *(intraday array must exist in `health_data_cache` before this branch can read it)*
+
+**Layers touched:** HTTP route / response payload
+*(ActivityChart at `App.jsx:196` is metric-agnostic — no UI code change needed)*
+
+**What to build:**
+
+- In `/api/activity-history` (`server.js:149`), add a branch for `range === 'day' && type === 'heart'`:
+  1. Read `health_data_cache` row for `targetDate`.
+  2. If found: return `JSON.parse(row.data).heartRate[0].intraday.map(p => ({ label: p.time, value: p.value }))`.
+  3. If not found: live-fetch 15-min intraday HR and return same shape.
+  4. Any failure: return `[]`.
+
+**What NOT to build:** Cache backfill (→ #5); no changes to `ActivityChart.jsx`.
+
+**Acceptance criteria:**
+- [ ] `curl ".../api/activity-history?range=day&type=heart&date=<date>" | jq 'length'` → 1–96; `jq '.[0]'` → `{ "label": "HH:MM", "value": <number> }`.
+- [ ] Clicking "Day" on the HR chart → smooth area curve renders.
+- [ ] Uncached date → falls back to live fetch, still returns valid array.
+- [ ] Live fetch failure → returns `[]`, chart shows empty state, no crash.
+- [ ] "Week" and "Month" buttons on HR chart still work.
+- [ ] "Day" on Steps chart still uses the existing steps path (`server.js:176`), unaffected.
+
+---
+
+### Issue #5 — Infra: historical cache auto-invalidates on deploy and backfills with new data shape
+
+**Slice summary:** Engineer adds a schema-version table, wipes the old cache on startup, updates `cacheHistoricalData` to fetch sleep segments + intraday HR, and demos a server restart that logs the wipe then progressively repopulates historical dates with real stages/bedtime/zones.
+
+**Depends on:** #1, #3 *(backfill must produce the new shape those issues define)*
+
+**Layers touched:** DB schema · server fetch · data transform
+*(No UI changes; historical dates just start rendering correctly as rows are rebuilt)*
+
+**What to build:**
+
+- In schema init (`server.js:20`), add `CREATE TABLE IF NOT EXISTS cache_meta (key TEXT PRIMARY KEY, value TEXT)`.
+
+- After schema init, add a migration check: if `cache_meta` value for `health_data_schema` ≠ `"v2"`, run `DELETE FROM health_data_cache`, log `[CACHE] Schema v2 migration: cleared health_data_cache for rebuild`, set version to `"v2"`, then call `cacheHistoricalData()`. Remove any existing direct call to `cacheHistoricalData()` at startup (migration is now the only trigger).
+
+- In `cacheHistoricalData` (`server.js:594`), inside the per-date loop (`server.js:673-741`), add:
+  1. Intraday HR: `aggregateWithRetry` with `bucketByTime: 900000` — add a `bucketDurationMs` parameter (default 86400000) to the existing helper (`server.js:625`).
+  2. Sleep segments: new retrying helper that omits `bucketByTime` entirely.
+  3. Pass both to `fitGoogleToFitbitShape`.
+
+**What NOT to build:** No UI changes; no `daily_summary` schema changes (new fields stay in the `health_data_cache` JSON blob).
+
+**Acceptance criteria:**
+- [ ] First restart: `server.log` shows `[CACHE] Schema v2 migration: cleared health_data_cache for rebuild` exactly once, then `[CACHE] Cached YYYY-MM-DD` lines resuming.
+- [ ] Second restart: NO deletion log; existing rows preserved; already-cached dates skipped.
+- [ ] After a date repopulates: `sqlite3 fitbit.db "SELECT json_extract(data, '$.sleepSummary.efficiency') FROM health_data_cache WHERE date='<date-with-sleep>'"` → number 0–100 (not null).
+- [ ] After a date repopulates: `sqlite3 fitbit.db "SELECT json_extract(data, '$.heartRate[0].intraday') FROM health_data_cache WHERE date='<recent>'"` → non-empty JSON array.
+- [ ] Single-date fetch failure (segment or intraday) → that date's row still written with zeros; loop continues.
+- [ ] Existing fields (`steps`, `calories`, `sleepSummary.totalMinutesAsleep`) still present in repopulated rows.
+- [ ] `/api/health-data` for a repopulated historical date serves from cache (log shows `[API-CACHE] Health data hit`) with new fields present.
 
 ## Verification
 
