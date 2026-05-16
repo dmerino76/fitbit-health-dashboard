@@ -555,13 +555,6 @@ function fitGoogleToFitbitShape(googleData) {
   const weightValue = extractValue(googleData.weight)?.[0]?.fpVal || 0;
   const waterMl = extractValue(googleData.water)?.[0]?.fpVal || 0;
 
-  // Google Fit heart_rate.bpm aggregate returns value array: [0]=average, [1]=max, [2]=min
-  const avgBpm = heartAllValues[0]?.fpVal ? Math.round(heartAllValues[0].fpVal) : 0;
-  const maxBpm = heartAllValues[1]?.fpVal ? Math.round(heartAllValues[1].fpVal) : 0;
-  const minBpm = heartAllValues[2]?.fpVal ? Math.round(heartAllValues[2].fpVal) : 0;
-  // Use daily minimum as resting heart rate (best available proxy without sleep window)
-  const restingHR = minBpm || avgBpm || 0;
-
   // Compute heart rate zones using standard max HR formula
   const maxHR = 220 - 30; // Assuming age 30; could be dynamic per user
   const heartRateZones = [
@@ -600,6 +593,17 @@ function fitGoogleToFitbitShape(googleData) {
       }
     });
   }
+
+  // Derive min/avg/max from the intraday series (more reliable than the daily aggregate value array).
+  // The daily com.google.heart_rate.bpm aggregate returns only value[0]=mean; [1]/[2] are not guaranteed.
+  const intradayValues = intraday.map(p => p.value);
+  const minBpm = intradayValues.length ? Math.min(...intradayValues) : 0;
+  const maxBpm = intradayValues.length ? Math.max(...intradayValues) : 0;
+  const avgBpm = intradayValues.length
+    ? Math.round(intradayValues.reduce((s, v) => s + v, 0) / intradayValues.length)
+    : (heartAllValues[0]?.fpVal ? Math.round(heartAllValues[0].fpVal) : 0);
+  // Use daily minimum 15-min bucket as resting HR; fall back to daily aggregate mean
+  const restingHR = minBpm || avgBpm || 0;
 
   // Sleep data processing
   let sleepTotal = 0;
