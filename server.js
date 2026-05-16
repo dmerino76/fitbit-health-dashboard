@@ -482,6 +482,17 @@ app.get('/api/health-data', async (req, res) => {
       console.warn('[API-WARN] Sleep data unavailable:', err.response?.data?.error?.message || err.message);
     }
 
+    // Fetch per-segment sleep stage data (no bucketByTime — each segment is its own point)
+    const sleepSegmentsResp = await axios.post(
+      'https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate',
+      {
+        aggregateBy: [{ dataTypeName: 'com.google.sleep.segment' }],
+        startTimeMillis: dayStart(today),
+        endTimeMillis: dayEnd(today)
+      },
+      { headers }
+    ).catch(() => null);
+
     // Map Google Fit response to Fitbit shape for frontend compatibility
     const result = fitGoogleToFitbitShape({
       steps: stepsData,
@@ -492,7 +503,8 @@ app.get('/api/health-data', async (req, res) => {
       weight: weightData,
       water: waterData,
       nutrition: nutritionData,
-      sleep: sleepData
+      sleep: sleepData,
+      sleepSegments: sleepSegmentsResp?.data
     });
 
     // Cache the result for past dates
@@ -547,18 +559,36 @@ function fitGoogleToFitbitShape(googleData) {
   // Sleep data processing
   let sleepTotal = 0;
   let sleepStages = { deep: 0, rem: 0, light: 0, wake: 0 };
+
+  // totalMinutesAsleep comes from the parent sleep session (activityType=72)
   if (googleData.sleep && googleData.sleep.session) {
     googleData.sleep.session.forEach(session => {
-      const minutes = Math.round((parseInt(session.endTimeMillis) - parseInt(session.startTimeMillis)) / 60000);
-      switch (session.activityType) {
-        case 72:  sleepTotal += minutes; break; // parent sleep session
-        case 109: sleepStages.light += minutes; break;
-        case 110: sleepStages.deep  += minutes; break;
-        case 111: sleepStages.rem   += minutes; break;
-        case 112: sleepStages.wake  += minutes; break;
+      if (session.activityType === 72) {
+        sleepTotal += Math.round((parseInt(session.endTimeMillis) - parseInt(session.startTimeMillis)) / 60000);
       }
     });
   }
+
+  // Stage breakdown from com.google.sleep.segment dataset
+  // intVal mapping: 1=wake, 3=out-of-bed (skip), 4=light, 5=deep, 6=rem
+  const segmentPoints = googleData.sleepSegments?.bucket?.[0]?.dataset?.[0]?.point ?? [];
+  segmentPoints.forEach(point => {
+    const intVal = point.value?.[0]?.intVal;
+    const durationMins = (parseInt(point.endTimeNanos) - parseInt(point.startTimeNanos)) / 60_000_000_000;
+    switch (intVal) {
+      case 1: sleepStages.wake  += durationMins; break;
+      case 4: sleepStages.light += durationMins; break;
+      case 5: sleepStages.deep  += durationMins; break;
+      case 6: sleepStages.rem   += durationMins; break;
+      // case 3: out-of-bed — skip
+    }
+  });
+
+  // Round stage minutes to integers
+  sleepStages.wake  = Math.round(sleepStages.wake);
+  sleepStages.light = Math.round(sleepStages.light);
+  sleepStages.deep  = Math.round(sleepStages.deep);
+  sleepStages.rem   = Math.round(sleepStages.rem);
 
   return {
     profile: null,
