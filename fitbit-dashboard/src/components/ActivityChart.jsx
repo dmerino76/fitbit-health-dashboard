@@ -6,7 +6,7 @@ import {
 } from 'recharts';
 import { Activity } from 'lucide-react';
 
-const ActivityChart = ({ token, date, title = "Activity Trends", icon: Icon = Activity, metricType = 'steps', unit = 'steps', color = 'cyan', isDarkMode = true }) => {
+const ActivityChart = ({ token, date, title = "Activity Trends", icon: Icon = Activity, metricType = 'steps', unit = 'steps', color = 'cyan', isDarkMode = true, onDateSelect }) => {
     const [range, setRange] = useState('week'); // 'day', 'week', 'month'
     const [data, setData] = useState([]);
     const [loading, setLoading] = useState(false);
@@ -146,12 +146,13 @@ const ActivityChart = ({ token, date, title = "Activity Trends", icon: Icon = Ac
                                     tickLine={false}
                                     axisLine={false}
                                     height={range === 'week' ? 50 : 30}
+                                    onClick={(data) => onDateSelect?.(data.value)}
                                     tick={({ x, y, payload }) => {
                                         const label = range === 'month'
                                             ? new Date(payload.value + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })
                                             : formatDate(payload.value);
                                         return (
-                                            <g transform={`translate(${x},${y})`}>
+                                            <g transform={`translate(${x},${y})`} style={{ cursor: onDateSelect ? 'pointer' : 'default' }}>
                                                 <text
                                                     x={0} y={0} dy={16}
                                                     textAnchor="end"
@@ -176,6 +177,8 @@ const ActivityChart = ({ token, date, title = "Activity Trends", icon: Icon = Ac
                                     dataKey="value"
                                     fill={theme.stroke}
                                     radius={[4, 4, 0, 0]}
+                                    onClick={(barData) => onDateSelect?.(barData.date)}
+                                    style={{ cursor: onDateSelect ? 'pointer' : 'default' }}
                                 />
                             </BarChart>
                         )}
