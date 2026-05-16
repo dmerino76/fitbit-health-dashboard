@@ -46,9 +46,6 @@ const ActivityChart = ({ token, date, title = "Activity Trends", icon: Icon = Ac
     };
     const theme = colorMap[color] || colorMap.cyan;
 
-    const formatDate = (dateStr) =>
-        new Date(dateStr + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-
     const CustomTooltip = ({ active, payload, label }) => {
         if (active && payload && payload.length) {
             return (
