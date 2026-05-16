@@ -21,6 +21,28 @@ function App() {
         return saved ? saved === 'dark' : true;
     });
     const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+    const [sliderTooltip, setSliderTooltip] = useState({ visible: false, label: '' });
+
+    const SLIDER_DAYS = 30;
+
+    const dateToIndex = (dateStr) => {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const diff = Math.round((today - new Date(dateStr)) / 86400000);
+        return Math.max(0, Math.min(SLIDER_DAYS - 1, SLIDER_DAYS - 1 - diff));
+    };
+
+    const indexToDate = (idx) => {
+        const d = new Date();
+        d.setHours(0, 0, 0, 0);
+        d.setDate(d.getDate() - (SLIDER_DAYS - 1 - idx));
+        return d.toISOString().split('T')[0];
+    };
+
+    const formatDate = (dateStr) =>
+        new Date(dateStr + 'T00:00:00').toLocaleDateString('en-GB', {
+            day: '2-digit', month: 'short', year: 'numeric'
+        });
 
     useEffect(() => {
         const params = new URLSearchParams(window.location.search);
@@ -105,25 +127,48 @@ function App() {
     return (
         <div className={`min-h-screen p-8 font-sans ${isDarkMode ? 'bg-slate-950 text-slate-50' : 'bg-slate-50 text-slate-900'}`}>
             {/* Header */}
-            <header className={`max-w-7xl mx-auto flex justify-between items-center mb-12 pb-6 border-b ${isDarkMode ? 'border-white/5' : 'border-slate-200'}`}>
-                <div className="flex items-center gap-3">
+            <header className={`max-w-7xl mx-auto flex items-center mb-12 pb-6 border-b ${isDarkMode ? 'border-white/5' : 'border-slate-200'}`}>
+                <div className="flex items-center gap-3 shrink-0">
                     <div className={`p-2 rounded-lg ${isDarkMode ? 'bg-blue-500/10' : 'bg-blue-100'}`}>
                         <Activity className={`w-6 h-6 ${isDarkMode ? 'text-blue-400' : 'text-blue-600'}`} />
                     </div>
                     <h1 className="text-2xl font-bold">Health Sphere</h1>
                 </div>
 
-                <div className="flex items-center gap-4">
-                    <div className={`flex items-center gap-2 px-4 py-2 rounded-lg border ${isDarkMode ? 'bg-gray-900 border-white/5' : 'bg-white border-slate-200'}`}>
-                        <Calendar className={`w-4 h-4 ${isDarkMode ? 'text-gray-500' : 'text-slate-400'}`} />
+                {/* Centre zone: date input + slider */}
+                <div className="flex items-center gap-3 flex-1 mx-4 min-w-0">
+                    <input
+                        type="date"
+                        value={date}
+                        onChange={(e) => setDate(e.target.value)}
+                        className={`text-sm outline-none cursor-pointer rounded px-2 py-1 ${isDarkMode ? 'bg-gray-800 text-white' : 'bg-slate-100 text-slate-900'}`}
+                        style={{ colorScheme: isDarkMode ? 'dark' : 'light' }}
+                    />
+                    <div className="relative flex-1 min-w-0">
+                        {sliderTooltip.visible && (
+                            <div className="absolute -top-8 left-1/2 -translate-x-1/2 bg-gray-900 text-white text-xs px-2 py-1 rounded pointer-events-none whitespace-nowrap z-10">
+                                {sliderTooltip.label}
+                            </div>
+                        )}
                         <input
-                            type="date"
-                            value={date}
-                            onChange={(e) => setDate(e.target.value)}
-                            className={`text-sm outline-none cursor-pointer ${isDarkMode ? 'bg-transparent text-white' : 'bg-white text-slate-900'}`}
-                            style={{ colorScheme: isDarkMode ? 'dark' : 'light' }}
+                            type="range"
+                            min={0}
+                            max={SLIDER_DAYS - 1}
+                            value={dateToIndex(date)}
+                            onChange={(e) => setDate(indexToDate(Number(e.target.value)))}
+                            onMouseMove={(e) => {
+                                const rect = e.target.getBoundingClientRect();
+                                const ratio = (e.clientX - rect.left) / rect.width;
+                                const idx = Math.round(ratio * (SLIDER_DAYS - 1));
+                                setSliderTooltip({ visible: true, label: formatDate(indexToDate(Math.max(0, Math.min(SLIDER_DAYS - 1, idx)))) });
+                            }}
+                            onMouseLeave={() => setSliderTooltip({ visible: false, label: '' })}
+                            className="w-full accent-blue-500 cursor-pointer"
                         />
                     </div>
+                </div>
+
+                <div className="flex items-center gap-4 shrink-0">
                     <button
                         onClick={toggleTheme}
                         className={`p-2 transition-colors ${isDarkMode ? 'text-gray-400 hover:text-yellow-400' : 'text-slate-600 hover:text-slate-900'}`}

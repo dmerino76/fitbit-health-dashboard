@@ -47,6 +47,9 @@ db.serialize(() => {
   db.run(`DELETE FROM health_data_cache
           WHERE CAST(json_extract(data, '$.sleepSummary.totalMinutesAsleep') AS INTEGER) = 0
              OR json_extract(data, '$.sleepSummary.totalMinutesAsleep') IS NULL`);
+  db.run(`DELETE FROM health_data_cache
+          WHERE CAST(json_extract(data, '$.heartRate[0].value.avgBpm') AS REAL) = 0
+             OR json_extract(data, '$.heartRate[0].value.avgBpm') IS NULL`);
   // Clear stale zero-sleep rows from daily_summary so trend chart re-fetches real values
   db.run(`UPDATE daily_summary SET sleep_minutes = NULL WHERE sleep_minutes = 0`);
   // Purge health_data_cache entries poisoned with missing heart rate data
@@ -303,7 +306,7 @@ app.get('/api/activity-history', async (req, res) => {
 
     if (missingCount === 0 && !isToday && dateList.length > 0) {
       console.log(`[ActivityHistory] DB HIT: ${range} ${type} for ${targetDate}`);
-      const result = dateList.map(d => ({ label: d.slice(range === 'week' ? 5 : 8), value: dbMap[d] || 0 }));
+      const result = dateList.map(d => ({ label: d, date: d, value: dbMap[d] || 0 }));
       return res.json(result);
     }
 
@@ -356,7 +359,7 @@ app.get('/api/activity-history', async (req, res) => {
 
       dateList.forEach(d => {
         const val = sleepMap[d] || 0;
-        result.push({ label: d.slice(range === 'week' ? 5 : 8), value: val });
+        result.push({ label: d, date: d, value: val });
         upserts.push({ date: d, value: val });
       });
     } else {
@@ -379,7 +382,7 @@ app.get('/api/activity-history', async (req, res) => {
           // Fall back to database cache on rate limit
           dateList.forEach(d => {
             const val = dbMap[d] || 0;
-            result.push({ label: d.slice(range === 'week' ? 5 : 8), value: val });
+            result.push({ label: d, date: d, value: val });
             upserts.push({ date: d, value: val });
           });
           return res.json(result);
@@ -406,7 +409,7 @@ app.get('/api/activity-history', async (req, res) => {
 
       dateList.forEach(d => {
         const val = valueMap[d] || 0;
-        result.push({ label: d.slice(range === 'week' ? 5 : 8), value: val });
+        result.push({ label: d, date: d, value: val });
         upserts.push({ date: d, value: val });
       });
     }

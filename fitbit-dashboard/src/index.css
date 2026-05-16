@@ -2,6 +2,10 @@
 @tailwind components;
 @tailwind utilities;
 
+input[type="range"]::-webkit-slider-thumb {
+  transition: transform 0.2s ease;
+}
+
 body {
   @apply bg-fitbit-dark text-white;
   font-family: 'Inter', sans-serif;
