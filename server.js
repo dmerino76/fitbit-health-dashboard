@@ -43,6 +43,10 @@ db.serialize(() => {
     key TEXT PRIMARY KEY,
     value TEXT
   )`);
+  // Purge health_data_cache entries poisoned with zero sleep (cached before sleep synced to Google Fit)
+  db.run(`DELETE FROM health_data_cache
+          WHERE CAST(json_extract(data, '$.sleepSummary.totalMinutesAsleep') AS INTEGER) = 0
+             OR json_extract(data, '$.sleepSummary.totalMinutesAsleep') IS NULL`);
 });
 
 // Google OAuth2 Setup
@@ -573,8 +577,8 @@ app.get('/api/health-data', async (req, res) => {
       heartIntraday: heartIntradayData
     });
 
-    // Cache the result for past dates
-    if (!isToday) {
+    // Cache the result for past dates — skip if sleep is missing to avoid poisoning the cache
+    if (!isToday && (result.sleepSummary?.totalMinutesAsleep ?? 0) > 0) {
       db.run(
         "INSERT OR REPLACE INTO health_data_cache (date, data, created_at) VALUES (?, ?, ?)",
         [today, JSON.stringify(result), Math.floor(Date.now() / 1000)]
