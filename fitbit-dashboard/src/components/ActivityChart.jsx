@@ -34,6 +34,9 @@ const ActivityChart = ({ token, date, title = "Activity Trends", icon: Icon = Ac
         }
     };
 
+    const formatDate = (dateStr) =>
+        new Date(dateStr + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+
     // Color Maps
     const colorMap = {
         cyan: { stroke: '#06b6d4', fill: 'url(#colorCyan)', fillOp: 0.3 },
@@ -137,9 +140,27 @@ const ActivityChart = ({ token, date, title = "Activity Trends", icon: Icon = Ac
                                 <XAxis
                                     dataKey="label"
                                     stroke="#9ca3af"
-                                    fontSize={12}
                                     tickLine={false}
                                     axisLine={false}
+                                    height={range === 'week' ? 50 : 30}
+                                    tick={({ x, y, payload }) => {
+                                        const label = range === 'month'
+                                            ? new Date(payload.value + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })
+                                            : formatDate(payload.value);
+                                        return (
+                                            <g transform={`translate(${x},${y})`}>
+                                                <text
+                                                    x={0} y={0} dy={16}
+                                                    textAnchor="end"
+                                                    fill="#9ca3af"
+                                                    fontSize={10}
+                                                    transform={range === 'week' ? 'rotate(-30)' : undefined}
+                                                >
+                                                    {label}
+                                                </text>
+                                            </g>
+                                        );
+                                    }}
                                 />
                                 <YAxis
                                     stroke="#9ca3af"
