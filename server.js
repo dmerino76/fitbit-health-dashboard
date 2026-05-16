@@ -47,6 +47,9 @@ db.serialize(() => {
   db.run(`DELETE FROM health_data_cache
           WHERE CAST(json_extract(data, '$.sleepSummary.totalMinutesAsleep') AS INTEGER) = 0
              OR json_extract(data, '$.sleepSummary.totalMinutesAsleep') IS NULL`);
+  db.run(`DELETE FROM health_data_cache
+          WHERE CAST(json_extract(data, '$.heartRate[0].value.avgBpm') AS REAL) = 0
+             OR json_extract(data, '$.heartRate[0].value.avgBpm') IS NULL`);
   // Clear stale zero-sleep rows from daily_summary so trend chart re-fetches real values
   db.run(`UPDATE daily_summary SET sleep_minutes = NULL WHERE sleep_minutes = 0`);
 });
@@ -299,7 +302,7 @@ app.get('/api/activity-history', async (req, res) => {
 
     if (missingCount === 0 && !isToday && dateList.length > 0) {
       console.log(`[ActivityHistory] DB HIT: ${range} ${type} for ${targetDate}`);
-      const result = dateList.map(d => ({ label: d.slice(range === 'week' ? 5 : 8), value: dbMap[d] || 0 }));
+      const result = dateList.map(d => ({ label: d, date: d, value: dbMap[d] || 0 }));
       return res.json(result);
     }
 
@@ -352,7 +355,7 @@ app.get('/api/activity-history', async (req, res) => {
 
       dateList.forEach(d => {
         const val = sleepMap[d] || 0;
-        result.push({ label: d.slice(range === 'week' ? 5 : 8), value: val });
+        result.push({ label: d, date: d, value: val });
         upserts.push({ date: d, value: val });
       });
     } else {
@@ -375,7 +378,7 @@ app.get('/api/activity-history', async (req, res) => {
           // Fall back to database cache on rate limit
           dateList.forEach(d => {
             const val = dbMap[d] || 0;
-            result.push({ label: d.slice(range === 'week' ? 5 : 8), value: val });
+            result.push({ label: d, date: d, value: val });
             upserts.push({ date: d, value: val });
           });
           return res.json(result);
@@ -402,7 +405,7 @@ app.get('/api/activity-history', async (req, res) => {
 
       dateList.forEach(d => {
         const val = valueMap[d] || 0;
-        result.push({ label: d.slice(range === 'week' ? 5 : 8), value: val });
+        result.push({ label: d, date: d, value: val });
         upserts.push({ date: d, value: val });
       });
     }
@@ -579,8 +582,12 @@ app.get('/api/health-data', async (req, res) => {
       heartIntraday: heartIntradayData
     });
 
-    // Cache the result for past dates — skip if sleep is missing to avoid poisoning the cache
-    if (!isToday && (result.sleepSummary?.totalMinutesAsleep ?? 0) > 0) {
+    // Cache the result for past dates — skip if sleep or HR is missing to avoid poisoning the cache
+    if (
+      !isToday &&
+      (result.sleepSummary?.totalMinutesAsleep ?? 0) > 0 &&
+      (result.heartRate?.[0]?.value?.avgBpm ?? 0) > 0
+    ) {
       db.run(
         "INSERT OR REPLACE INTO health_data_cache (date, data, created_at) VALUES (?, ?, ?)",
         [today, JSON.stringify(result), Math.floor(Date.now() / 1000)]
@@ -902,8 +909,11 @@ async function cacheHistoricalData() {
           heartIntraday: heartIntradayData
         });
 
-        // Cache to database — skip if sleep is missing to avoid re-poisoning the cache
-        if ((result.sleepSummary?.totalMinutesAsleep ?? 0) > 0) {
+        // Cache to database — skip if sleep or HR is missing to avoid re-poisoning the cache
+        if (
+          (result.sleepSummary?.totalMinutesAsleep ?? 0) > 0 &&
+          (result.heartRate?.[0]?.value?.avgBpm ?? 0) > 0
+        ) {
           db.run(
             "INSERT OR REPLACE INTO health_data_cache (date, data, created_at) VALUES (?, ?, ?)",
             [dateStr, JSON.stringify(result), Math.floor(Date.now() / 1000)]
