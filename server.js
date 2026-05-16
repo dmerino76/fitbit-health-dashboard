@@ -443,6 +443,26 @@ app.get('/api/health-data', async (req, res) => {
       }
     };
 
+    // Helper for 15-min intraday HR fetch
+    const aggregateIntraday = async (dataTypeName) => {
+      try {
+        const response = await axios.post(
+          'https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate',
+          {
+            aggregateBy: [{ dataTypeName }],
+            bucketByTime: { durationMillis: 900000 },
+            startTimeMillis: dayStart(today),
+            endTimeMillis: dayEnd(today),
+          },
+          { headers }
+        );
+        return response.data;
+      } catch (err) {
+        console.error(`[API-ERROR] Intraday aggregate failed for ${dataTypeName}:`, err.response?.data || err.message);
+        return null;
+      }
+    };
+
     // Fetch aggregates in parallel (only supported data types)
     const [
       stepsData,
@@ -452,7 +472,8 @@ app.get('/api/health-data', async (req, res) => {
       heartData,
       weightData,
       waterData,
-      nutritionData
+      nutritionData,
+      heartIntradayData
     ] = await Promise.all([
       aggregate('com.google.step_count.delta'),
       aggregate('com.google.calories.expended'),
@@ -461,7 +482,8 @@ app.get('/api/health-data', async (req, res) => {
       aggregate('com.google.heart_rate.bpm'),
       aggregate('com.google.weight'),
       aggregate('com.google.hydration'),
-      aggregate('com.google.nutrition')
+      aggregate('com.google.nutrition'),
+      aggregateIntraday('com.google.heart_rate.bpm')
     ]);
 
     // Sleep data uses sessions endpoint
@@ -492,7 +514,8 @@ app.get('/api/health-data', async (req, res) => {
       weight: weightData,
       water: waterData,
       nutrition: nutritionData,
-      sleep: sleepData
+      sleep: sleepData,
+      heartIntraday: heartIntradayData
     });
 
     // Cache the result for past dates
@@ -528,14 +551,18 @@ function fitGoogleToFitbitShape(googleData) {
   const caloriesValue = extractValue(googleData.calories)?.[0]?.fpVal || 0;
   const distanceMeters = extractValue(googleData.distance)?.[0]?.fpVal || 0;
   const activeMinutes = extractValue(googleData.activeMinutes)?.[0]?.intVal || 0;
-  const heartValues = extractValue(googleData.heart)?.[0] || {};
+  const heartAllValues = extractValue(googleData.heart) || [];
   const weightValue = extractValue(googleData.weight)?.[0]?.fpVal || 0;
   const waterMl = extractValue(googleData.water)?.[0]?.fpVal || 0;
 
-  // Calculate resting heart rate (min of the day, or use the value if single point)
-  const restingHR = heartValues.fpVal ? Math.round(heartValues.fpVal) : 0;
+  // Google Fit heart_rate.bpm aggregate returns value array: [0]=average, [1]=max, [2]=min
+  const avgBpm = heartAllValues[0]?.fpVal ? Math.round(heartAllValues[0].fpVal) : 0;
+  const maxBpm = heartAllValues[1]?.fpVal ? Math.round(heartAllValues[1].fpVal) : 0;
+  const minBpm = heartAllValues[2]?.fpVal ? Math.round(heartAllValues[2].fpVal) : 0;
+  // Use daily minimum as resting heart rate (best available proxy without sleep window)
+  const restingHR = minBpm || avgBpm || 0;
 
-  // Compute heart rate zones from resting HR (using standard zones based on max HR formula)
+  // Compute heart rate zones using standard max HR formula
   const maxHR = 220 - 30; // Assuming age 30; could be dynamic per user
   const heartRateZones = [
     { name: 'Out of Zone', min: 0, max: Math.round(maxHR * 0.5), minutes: 0, color: '#6b7280' },
@@ -543,6 +570,36 @@ function fitGoogleToFitbitShape(googleData) {
     { name: 'Cardio', min: Math.round(maxHR * 0.7), max: Math.round(maxHR * 0.85), minutes: 0, color: '#f97316' },
     { name: 'Peak', min: Math.round(maxHR * 0.85), max: maxHR, minutes: 0, color: '#ef4444' }
   ];
+
+  // Build intraday series from 15-min buckets and compute zone minutes
+  const intraday = [];
+  if (googleData.heartIntraday && googleData.heartIntraday.bucket) {
+    googleData.heartIntraday.bucket.forEach(bucket => {
+      const dataset = bucket.dataset?.[0];
+      if (!dataset || !dataset.point || dataset.point.length === 0) return;
+      const point = dataset.point[0];
+      const bpmVal = point.value?.[0]?.fpVal;
+      if (!bpmVal) return;
+
+      // Format startTimeMillis as local HH:MM
+      const d = new Date(parseInt(bucket.startTimeMillis));
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      intraday.push({ time: `${hh}:${mm}`, value: Math.round(bpmVal) });
+
+      // Accumulate zone minutes (each non-empty bucket = 15 min)
+      const bpm = Math.round(bpmVal);
+      if (bpm >= heartRateZones[3].min) {
+        heartRateZones[3].minutes += 15;
+      } else if (bpm >= heartRateZones[2].min) {
+        heartRateZones[2].minutes += 15;
+      } else if (bpm >= heartRateZones[1].min) {
+        heartRateZones[1].minutes += 15;
+      } else {
+        heartRateZones[0].minutes += 15;
+      }
+    });
+  }
 
   // Sleep data processing
   let sleepTotal = 0;
@@ -576,7 +633,7 @@ function fitGoogleToFitbitShape(googleData) {
         activeZoneMinutes: 30
       }
     },
-    heartRate: [{ value: { restingHeartRate: restingHR, heartRateZones } }],
+    heartRate: [{ value: { restingHeartRate: restingHR, minBpm, avgBpm, maxBpm, heartRateZones }, intraday }],
     sleep: [],
     sleepSummary: {
       totalMinutesAsleep: sleepTotal,
