@@ -152,6 +152,9 @@ const dayStart = (dateStr) => new Date(dateStr + 'T00:00:00').getTime();
 const dayEnd = (dateStr) => new Date(dateStr + 'T23:59:59').getTime();
 const toRFC3339 = (ms) => new Date(ms).toISOString();
 
+const createGoogleFitGateway = require('./lib/googleFitGateway');
+const GoogleFitGateway = createGoogleFitGateway(axios, { dayStart, dayEnd, toRFC3339 });
+
 // Activity history endpoint (charts: day/week/month views)
 app.get('/api/activity-history', async (req, res) => {
   const authHeader = req.headers.authorization?.split(' ')[1];
@@ -463,114 +466,7 @@ app.get('/api/health-data', async (req, res) => {
 
     console.log(`[API-FETCH] Full Health Data for ${today}`);
 
-    const headers = { 'Authorization': `Bearer ${accessToken}` };
-
-    // Helper for Google Fit aggregate requests
-    const aggregate = async (dataTypeName) => {
-      try {
-        const response = await axios.post(
-          'https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate',
-          {
-            aggregateBy: [{ dataTypeName }],
-            bucketByTime: { durationMillis: 86400000 },
-            startTimeMillis: dayStart(today),
-            endTimeMillis: dayEnd(today),
-          },
-          { headers }
-        );
-        return response.data;
-      } catch (err) {
-        console.error(`[API-ERROR] Aggregate failed for ${dataTypeName}:`, err.response?.data || err.message);
-        return null;
-      }
-    };
-
-    // Helper for 15-min intraday HR fetch
-    const aggregateIntraday = async (dataTypeName) => {
-      try {
-        const response = await axios.post(
-          'https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate',
-          {
-            aggregateBy: [{ dataTypeName }],
-            bucketByTime: { durationMillis: 900000 },
-            startTimeMillis: dayStart(today),
-            endTimeMillis: dayEnd(today),
-          },
-          { headers }
-        );
-        return response.data;
-      } catch (err) {
-        console.error(`[API-ERROR] Intraday aggregate failed for ${dataTypeName}:`, err.response?.data || err.message);
-        return null;
-      }
-    };
-
-    // Fetch aggregates in parallel (only supported data types)
-    const [
-      stepsData,
-      caloriesData,
-      distanceData,
-      activeMinutesData,
-      heartData,
-      weightData,
-      waterData,
-      nutritionData,
-      heartIntradayData
-    ] = await Promise.all([
-      aggregate('com.google.step_count.delta'),
-      aggregate('com.google.calories.expended'),
-      aggregate('com.google.distance.delta'),
-      aggregate('com.google.active_minutes'),
-      aggregate('com.google.heart_rate.bpm'),
-      aggregate('com.google.weight'),
-      aggregate('com.google.hydration'),
-      aggregate('com.google.nutrition'),
-      aggregateIntraday('com.google.heart_rate.bpm')
-    ]);
-
-    // Sleep data uses sessions endpoint
-    let sleepData = { session: [] };
-    try {
-      const sleepResponse = await axios.get(
-        'https://www.googleapis.com/fitness/v1/users/me/sessions',
-        {
-          params: {
-            startTime: toRFC3339(dayStart(today)),
-            endTime: toRFC3339(dayEnd(today))
-          },
-          headers
-        }
-      );
-      sleepData = sleepResponse.data;
-    } catch (err) {
-      console.warn('[API-WARN] Sleep data unavailable:', err.response?.data?.error?.message || err.message);
-    }
-
-    // Fetch per-segment sleep stage data (no bucketByTime — each segment is its own point)
-    const sleepSegmentsResp = await axios.post(
-      'https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate',
-      {
-        aggregateBy: [{ dataTypeName: 'com.google.sleep.segment' }],
-        startTimeMillis: dayStart(today),
-        endTimeMillis: dayEnd(today)
-      },
-      { headers }
-    ).catch(() => null);
-
-    // Map Google Fit response to Fitbit shape for frontend compatibility
-    const result = fitGoogleToFitbitShape({
-      steps: stepsData,
-      calories: caloriesData,
-      distance: distanceData,
-      activeMinutes: activeMinutesData,
-      heart: heartData,
-      weight: weightData,
-      water: waterData,
-      nutrition: nutritionData,
-      sleep: sleepData,
-      sleepSegments: sleepSegmentsResp?.data,
-      heartIntraday: heartIntradayData
-    });
+    const result = await GoogleFitGateway.fetchDay(accessToken, today);
 
     // Cache the result for past dates
     if (!isToday) {
@@ -585,165 +481,6 @@ app.get('/api/health-data', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch health data', details: errorDetail });
   }
 });
-
-// Response shape adapter: Google Fit → Fitbit format
-function fitGoogleToFitbitShape(googleData) {
-  const extractValue = (data, index = 0) => {
-    if (!data || !data.bucket || !data.bucket[index] || !data.bucket[index].dataset || !data.bucket[index].dataset[0]) {
-      return null;
-    }
-    const points = data.bucket[index].dataset[0].point;
-    if (!points || points.length === 0) return null;
-    return points[0].value;
-  };
-
-  // Core metrics (supported by Google Fit)
-  const stepsValue = extractValue(googleData.steps)?.[0]?.intVal || 0;
-  const caloriesValue = extractValue(googleData.calories)?.[0]?.fpVal || 0;
-  const distanceMeters = extractValue(googleData.distance)?.[0]?.fpVal || 0;
-  const activeMinutes = extractValue(googleData.activeMinutes)?.[0]?.intVal || 0;
-  const heartAllValues = extractValue(googleData.heart) || [];
-  const weightValue = extractValue(googleData.weight)?.[0]?.fpVal || 0;
-  const waterMl = extractValue(googleData.water)?.[0]?.fpVal || 0;
-
-  // Compute heart rate zones using standard max HR formula
-  const maxHR = 220 - 30; // Assuming age 30; could be dynamic per user
-  const heartRateZones = [
-    { name: 'Out of Zone', min: 0, max: Math.round(maxHR * 0.5), minutes: 0, color: '#6b7280' },
-    { name: 'Fat Burn', min: Math.round(maxHR * 0.5), max: Math.round(maxHR * 0.7), minutes: 0, color: '#0ea5e9' },
-    { name: 'Cardio', min: Math.round(maxHR * 0.7), max: Math.round(maxHR * 0.85), minutes: 0, color: '#f97316' },
-    { name: 'Peak', min: Math.round(maxHR * 0.85), max: maxHR, minutes: 0, color: '#ef4444' }
-  ];
-
-  // Build intraday series from 15-min buckets and compute zone minutes
-  const intraday = [];
-  if (googleData.heartIntraday && googleData.heartIntraday.bucket) {
-    googleData.heartIntraday.bucket.forEach(bucket => {
-      const dataset = bucket.dataset?.[0];
-      if (!dataset || !dataset.point || dataset.point.length === 0) return;
-      const point = dataset.point[0];
-      const bpmVal = point.value?.[0]?.fpVal;
-      if (!bpmVal) return;
-
-      // Format startTimeMillis as local HH:MM
-      const d = new Date(parseInt(bucket.startTimeMillis));
-      const hh = String(d.getHours()).padStart(2, '0');
-      const mm = String(d.getMinutes()).padStart(2, '0');
-      intraday.push({ time: `${hh}:${mm}`, value: Math.round(bpmVal) });
-
-      // Accumulate zone minutes (each non-empty bucket = 15 min)
-      const bpm = Math.round(bpmVal);
-      if (bpm >= heartRateZones[3].min) {
-        heartRateZones[3].minutes += 15;
-      } else if (bpm >= heartRateZones[2].min) {
-        heartRateZones[2].minutes += 15;
-      } else if (bpm >= heartRateZones[1].min) {
-        heartRateZones[1].minutes += 15;
-      } else {
-        heartRateZones[0].minutes += 15;
-      }
-    });
-  }
-
-  // Derive min/avg/max from the intraday series (more reliable than the daily aggregate value array).
-  // The daily com.google.heart_rate.bpm aggregate returns only value[0]=mean; [1]/[2] are not guaranteed.
-  const intradayValues = intraday.map(p => p.value);
-  const minBpm = intradayValues.length ? Math.min(...intradayValues) : 0;
-  const maxBpm = intradayValues.length ? Math.max(...intradayValues) : 0;
-  const avgBpm = intradayValues.length
-    ? Math.round(intradayValues.reduce((s, v) => s + v, 0) / intradayValues.length)
-    : (heartAllValues[0]?.fpVal ? Math.round(heartAllValues[0].fpVal) : 0);
-  // Use daily minimum 15-min bucket as resting HR; fall back to daily aggregate mean
-  const restingHR = minBpm || avgBpm || 0;
-
-  // Sleep data processing
-  let sleepTotal = 0;
-  let sleepStages = { deep: 0, rem: 0, light: 0, wake: 0 };
-
-  // totalMinutesAsleep comes from the parent sleep session (activityType=72)
-  if (googleData.sleep && googleData.sleep.session) {
-    googleData.sleep.session.forEach(session => {
-      if (session.activityType === 72) {
-        sleepTotal += Math.round((parseInt(session.endTimeMillis) - parseInt(session.startTimeMillis)) / 60000);
-      }
-    });
-  }
-
-  // Stage breakdown from com.google.sleep.segment dataset
-  // intVal mapping: 1=wake, 3=out-of-bed (skip), 4=light, 5=deep, 6=rem
-  const segmentPoints = googleData.sleepSegments?.bucket?.[0]?.dataset?.[0]?.point ?? [];
-  segmentPoints.forEach(point => {
-    const intVal = point.value?.[0]?.intVal;
-    const durationMins = (parseInt(point.endTimeNanos) - parseInt(point.startTimeNanos)) / 60_000_000_000;
-    switch (intVal) {
-      case 1: sleepStages.wake  += durationMins; break;
-      case 4: sleepStages.light += durationMins; break;
-      case 5: sleepStages.deep  += durationMins; break;
-      case 6: sleepStages.rem   += durationMins; break;
-      // case 3: out-of-bed — skip
-    }
-  });
-
-  // Round stage minutes to integers
-  sleepStages.wake  = Math.round(sleepStages.wake);
-  sleepStages.light = Math.round(sleepStages.light);
-  sleepStages.deep  = Math.round(sleepStages.deep);
-  sleepStages.rem   = Math.round(sleepStages.rem);
-
-  // Main sleep session (longest by duration) — drives bedtime/wake/efficiency
-  const sessions = googleData.sleep?.session ?? [];
-  const mainSession = sessions.length
-    ? sessions.reduce((a, b) =>
-        (parseInt(b.endTimeMillis) - parseInt(b.startTimeMillis)) >
-        (parseInt(a.endTimeMillis) - parseInt(a.startTimeMillis)) ? b : a
-      )
-    : null;
-  const bedtime = mainSession ? new Date(parseInt(mainSession.startTimeMillis)).toISOString() : null;
-  const wakeTime = mainSession ? new Date(parseInt(mainSession.endTimeMillis)).toISOString() : null;
-  const inBedMinutes = mainSession
-    ? Math.round((parseInt(mainSession.endTimeMillis) - parseInt(mainSession.startTimeMillis)) / 60000)
-    : null;
-  let efficiency = null;
-  if (inBedMinutes && inBedMinutes > 0) {
-    efficiency = Math.round((sleepStages.light + sleepStages.deep + sleepStages.rem) / inBedMinutes * 100);
-    if (efficiency > 100) efficiency = 100;
-    if (efficiency < 0) efficiency = 0;
-  }
-
-  return {
-    profile: null,
-    activity: {
-      summary: {
-        steps: stepsValue,
-        distances: [{ distance: (distanceMeters / 1000).toFixed(2) }],
-        caloriesOut: Math.round(caloriesValue),
-        activeZoneMinutes: { totalMinutes: activeMinutes }
-      },
-      goals: {
-        steps: 10000,
-        distance: 8,
-        caloriesOut: 2500,
-        activeZoneMinutes: 30
-      }
-    },
-    heartRate: [{ value: { restingHeartRate: restingHR, minBpm, avgBpm, maxBpm, heartRateZones }, intraday }],
-    sleep: [],
-    sleepSummary: {
-      totalMinutesAsleep: sleepTotal,
-      stages: sleepStages,
-      bedtime,
-      wakeTime,
-      inBedMinutes,
-      efficiency
-    },
-    nutrition: {
-      food: { summary: { protein: 0, carbs: 0, fat: 0, calories: 0 } },
-      water: { summary: { water: Math.round(waterMl) } }
-    },
-    body: null,
-    devices: null
-  };
-}
 
 // Historical data caching function
 async function cacheHistoricalData() {
@@ -770,61 +507,9 @@ async function cacheHistoricalData() {
       return;
     }
 
-    const headers = { 'Authorization': `Bearer ${accessToken}` };
     const today = new Date();
     const daysAgo = 90;
     const promises = [];
-
-    // Helper with exponential backoff for rate limit handling
-    const aggregateWithRetry = async (dataTypeName, dateStr, bucketDurationMs = 86400000, maxRetries = 2) => {
-      for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        try {
-          const response = await axios.post(
-            'https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate',
-            {
-              aggregateBy: [{ dataTypeName }],
-              bucketByTime: { durationMillis: bucketDurationMs },
-              startTimeMillis: dayStart(dateStr),
-              endTimeMillis: dayEnd(dateStr),
-            },
-            { headers, timeout: 10000 }
-          );
-          return response.data;
-        } catch (err) {
-          if (err.response?.status === 429 && attempt < maxRetries) {
-            const backoffMs = 2000 * Math.pow(2, attempt);
-            await new Promise(resolve => setTimeout(resolve, backoffMs));
-            continue;
-          }
-          return null;
-        }
-      }
-    };
-
-    // Sleep segments fetch (no bucketByTime — each segment is its own point)
-    const fetchSleepSegmentsWithRetry = async (dateStr, maxRetries = 2) => {
-      for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        try {
-          const response = await axios.post(
-            'https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate',
-            {
-              aggregateBy: [{ dataTypeName: 'com.google.sleep.segment' }],
-              startTimeMillis: dayStart(dateStr),
-              endTimeMillis: dayEnd(dateStr),
-            },
-            { headers, timeout: 10000 }
-          );
-          return response.data;
-        } catch (err) {
-          if (err.response?.status === 429 && attempt < maxRetries) {
-            const backoffMs = 2000 * Math.pow(2, attempt);
-            await new Promise(resolve => setTimeout(resolve, backoffMs));
-            continue;
-          }
-          return null;
-        }
-      }
-    };
 
     // Generate list of dates to cache (from January 1st to today)
     const currentYear = today.getFullYear();
@@ -850,47 +535,7 @@ async function cacheHistoricalData() {
 
       // Fetch data for this date (sequential, not parallel, to respect rate limits)
       try {
-        const stepsData = await aggregateWithRetry('com.google.step_count.delta', dateStr);
-        const heartData = await aggregateWithRetry('com.google.heart_rate.bpm', dateStr);
-        const heartIntradayData = await aggregateWithRetry('com.google.heart_rate.bpm', dateStr, 900000);
-        const weightData = await aggregateWithRetry('com.google.weight', dateStr);
-        const caloriesData = await aggregateWithRetry('com.google.calories.expended', dateStr);
-        const distanceData = await aggregateWithRetry('com.google.distance.delta', dateStr);
-        const waterData = await aggregateWithRetry('com.google.hydration', dateStr);
-        const sleepSegmentsData = await fetchSleepSegmentsWithRetry(dateStr);
-
-        // Sleep data from sessions
-        let sleepData = { session: [] };
-        try {
-          const sleepResponse = await axios.get(
-            'https://www.googleapis.com/fitness/v1/users/me/sessions',
-            {
-              params: {
-                startTime: Math.floor(dayStart(dateStr)),
-                endTime: Math.floor(dayEnd(dateStr))
-              },
-              headers,
-              timeout: 10000
-            }
-          );
-          sleepData = sleepResponse.data;
-        } catch (err) {
-          // Silently fail for sleep data
-        }
-
-        const result = fitGoogleToFitbitShape({
-          steps: stepsData,
-          calories: caloriesData,
-          distance: distanceData,
-          activeMinutes: null,
-          heart: heartData,
-          weight: weightData,
-          water: waterData,
-          nutrition: null,
-          sleep: sleepData,
-          sleepSegments: sleepSegmentsData,
-          heartIntraday: heartIntradayData
-        });
+        const result = await GoogleFitGateway.fetchDay(accessToken, dateStr);
 
         await CacheStore.setSnapshot(dateStr, result);
 
