@@ -140,6 +140,9 @@ const getValidToken = async (accessToken, refreshToken) => {
 const createGoogleFitGateway = require('./lib/googleFitGateway');
 const GoogleFitGateway = createGoogleFitGateway(axios);
 
+const createMetricHistory = require('./lib/metricHistory');
+const MetricHistory = createMetricHistory(CacheStore, GoogleFitGateway, axios);
+
 // Activity history endpoint (charts: day/week/month views)
 app.get('/api/activity-history', async (req, res) => {
   const authHeader = req.headers.authorization?.split(' ')[1];
