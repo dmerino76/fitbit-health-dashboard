@@ -9,6 +9,7 @@ const PORT = process.env.PORT || 3000;
 
 const axios = require('axios');
 const { google } = require('googleapis');
+const { dayStart, dayEnd, toRFC3339, getDatesInRange } = require('./dateHelpers');
 
 // Database Setup
 const sqlite3 = require('sqlite3').verbose();
@@ -64,18 +65,6 @@ const SCOPES = [
   'https://www.googleapis.com/auth/fitness.location.read',
   'https://www.googleapis.com/auth/userinfo.profile',
 ];
-
-// Helper to generate date array
-const getDatesInRange = (startDateStr, days) => {
-  const dates = [];
-  // Go backwards from start date
-  for (let i = 0; i < days; i++) {
-    const d = new Date(startDateStr);
-    d.setDate(d.getDate() - i);
-    dates.push(d.toISOString().split('T')[0]);
-  }
-  return dates.reverse();
-};
 
 // Middleware
 app.use(helmet());
@@ -148,12 +137,8 @@ const getValidToken = async (accessToken, refreshToken) => {
 };
 
 // Helper to convert date string to epoch milliseconds
-const dayStart = (dateStr) => new Date(dateStr + 'T00:00:00').getTime();
-const dayEnd = (dateStr) => new Date(dateStr + 'T23:59:59').getTime();
-const toRFC3339 = (ms) => new Date(ms).toISOString();
-
 const createGoogleFitGateway = require('./lib/googleFitGateway');
-const GoogleFitGateway = createGoogleFitGateway(axios, { dayStart, dayEnd, toRFC3339 });
+const GoogleFitGateway = createGoogleFitGateway(axios);
 
 // Activity history endpoint (charts: day/week/month views)
 app.get('/api/activity-history', async (req, res) => {
@@ -161,274 +146,20 @@ app.get('/api/activity-history', async (req, res) => {
   const refreshToken = req.query.refresh;
   const { date, range, type = 'steps' } = req.query;
   const targetDate = date || new Date().toISOString().split('T')[0];
-  const isToday = targetDate === new Date().toISOString().split('T')[0];
 
-  console.log(`[ActivityHistory] Request: ${type} | ${range} | ${targetDate}`);
-
-  if (!authHeader) {
-    console.warn('[ActivityHistory] No token provided');
-    return res.status(401).json({ error: 'No token provided' });
-  }
+  if (!authHeader) return res.status(401).json({ error: 'No token provided' });
 
   try {
     let accessToken = authHeader;
     if (refreshToken) {
-      try {
-        accessToken = await getValidToken(authHeader, refreshToken);
-      } catch (err) {
-        console.warn('[ActivityHistory] Token refresh failed, using provided token');
-      }
+      try { accessToken = await getValidToken(authHeader, refreshToken); }
+      catch { /* use provided token */ }
     }
-
-    const headers = { 'Authorization': `Bearer ${accessToken}` };
-
-    // --- DAY VIEW (INTRADAY STEPS) ---
-    if (range === 'day' && type === 'steps') {
-      if (!isToday) {
-        const cached = await new Promise((resolve) => {
-          db.get("SELECT json_data FROM intraday_json WHERE date = ?", [targetDate], (err, row) => resolve(row));
-        });
-        if (cached) {
-          console.log(`[ActivityHistory] DB HIT: Intraday Steps for ${targetDate}`);
-          return res.json(JSON.parse(cached.json_data));
-        }
-      }
-
-      try {
-        console.log(`[ActivityHistory] API FETCH: Intraday steps for ${targetDate}`);
-
-        // Fall back to daily total (intraday requires specific data source ID from user's data)
-        const dailyAggregate = await axios.post(
-          'https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate',
-          {
-            aggregateBy: [{ dataTypeName: 'com.google.step_count.delta' }],
-            bucketByTime: { durationMillis: 86400000 },
-            startTimeMillis: dayStart(targetDate),
-            endTimeMillis: dayEnd(targetDate)
-          },
-          { headers }
-        );
-
-        const totalSteps = dailyAggregate.data?.bucket?.[0]?.dataset?.[0]?.point?.[0]?.value?.[0]?.intVal || 0;
-        const result = [{ label: 'Total', value: totalSteps }];
-
-        console.log(`[ActivityHistory] API SUCCESS: ${result.length} items returned`);
-        db.run("INSERT OR REPLACE INTO intraday_json (date, json_data) VALUES (?, ?)", [targetDate, JSON.stringify(result)]);
-        return res.json(result);
-      } catch (err) {
-        console.error(`[ActivityHistory] API ERROR (Intraday):`, err.response?.data || err.message);
-        return res.json([]);
-      }
-    }
-
-    // --- DAY VIEW: INTRADAY HEART RATE ---
-    if (range === 'day' && type === 'heart') {
-      const cached = await new Promise(resolve =>
-        db.get('SELECT data FROM health_data_cache WHERE date = ?', [targetDate], (_, row) => resolve(row))
-      );
-      if (cached?.data) {
-        try {
-          const parsed = JSON.parse(cached.data);
-          const intraday = parsed.heartRate?.[0]?.intraday ?? [];
-          if (intraday.length > 0) {
-            return res.json(intraday.map(p => ({ label: p.time, value: p.value })));
-          }
-        } catch (_) { /* fall through */ }
-      }
-      try {
-        const resp = await axios.post(
-          'https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate',
-          {
-            aggregateBy: [{ dataTypeName: 'com.google.heart_rate.bpm' }],
-            bucketByTime: { durationMillis: 900000 },
-            startTimeMillis: dayStart(targetDate),
-            endTimeMillis: dayEnd(targetDate),
-          },
-          { headers }
-        );
-        const points = [];
-        (resp.data.bucket ?? []).forEach(bucket => {
-          const bpmVal = bucket.dataset?.[0]?.point?.[0]?.value?.[0]?.fpVal;
-          if (!bpmVal) return;
-          const d = new Date(parseInt(bucket.startTimeMillis));
-          const label = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-          points.push({ label, value: Math.round(bpmVal) });
-        });
-        return res.json(points);
-      } catch (_) {
-        return res.json([]);
-      }
-    }
-
-    // --- WEEK / MONTH VIEW ---
-    let dataTypeName;
-    switch (type) {
-      case 'heart':
-        dataTypeName = 'com.google.heart_rate.bpm';
-        break;
-      case 'sleep':
-        dataTypeName = 'com.google.sleep.segment';
-        break;
-      case 'weight':
-        dataTypeName = 'com.google.weight';
-        break;
-      case 'steps':
-      default:
-        dataTypeName = 'com.google.step_count.delta';
-        break;
-    }
-
-    const daysCount = range === 'week' ? 7 : (range === 'month' ? 30 : 1);
-    const dateList = getDatesInRange(targetDate, daysCount);
-
-    // Check database cache
-    const dbColumn = type === 'heart' ? 'resting_hr' : (type === 'sleep' ? 'sleep_minutes' : (type === 'weight' ? 'weight' : 'steps'));
-    const dbRows = await new Promise((resolve) => {
-      db.all(
-        `SELECT date, ${dbColumn} as val FROM daily_summary WHERE date IN (${dateList.map(() => '?').join(',')})`,
-        dateList,
-        (err, rows) => resolve(rows || [])
-      );
-    });
-
-    const dbMap = {};
-    dbRows.forEach(row => dbMap[row.date] = row.val);
-
-    const pastDates = isToday ? dateList.slice(0, -1) : dateList;
-    const missingCount = pastDates.filter(d => dbMap[d] == null).length;
-
-    if (missingCount === 0 && !isToday && dateList.length > 0) {
-      console.log(`[ActivityHistory] DB HIT: ${range} ${type} for ${targetDate}`);
-      const result = dateList.map(d => ({ label: d, date: d, value: dbMap[d] || 0 }));
-      return res.json(result);
-    }
-
-    console.log(`[ActivityHistory] API FETCH: Google Fit ${type} for ${range}`);
-
-    const result = [];
-    const upserts = [];
-
-    if (type === 'sleep') {
-      // Sleep uses sessions endpoint or fallback to cached data
-      let sleepMap = {};
-
-      try {
-        const sleepResponse = await axios.get(
-          'https://www.googleapis.com/fitness/v1/users/me/sessions',
-          {
-            params: {
-              startTime: toRFC3339(dayStart(dateList[0])),
-              endTime: toRFC3339(dayEnd(dateList[dateList.length - 1]))
-            },
-            headers
-          }
-        );
-
-        sleepResponse.data.session?.forEach(session => {
-          if (session.activityType === 72) { // parent sleep session = total duration
-            const sessionDate = new Date(parseInt(session.startTimeMillis)).toISOString().split('T')[0];
-            const minutes = Math.round((session.endTimeMillis - session.startTimeMillis) / 60000);
-            sleepMap[sessionDate] = (sleepMap[sessionDate] || 0) + minutes;
-          }
-        });
-
-        console.log('[ActivityHistory] Sleep data fetched from Google Fit');
-      } catch (sleepErr) {
-        console.warn('[ActivityHistory] Sleep API unavailable, using cached database data:', sleepErr.response?.data?.error?.message || sleepErr.message);
-
-        // Fallback: Read from database cache
-        const cachedSleep = await new Promise((resolve) => {
-          db.all(
-            `SELECT date, sleep_minutes as val FROM daily_summary WHERE date IN (${dateList.map(() => '?').join(',')})`,
-            dateList,
-            (err, rows) => resolve(rows || [])
-          );
-        });
-
-        cachedSleep.forEach(row => {
-          if (row.val) sleepMap[row.date] = row.val;
-        });
-      }
-
-      dateList.forEach(d => {
-        const val = sleepMap[d] || 0;
-        result.push({ label: d, date: d, value: val });
-        upserts.push({ date: d, value: val });
-      });
-    } else {
-      // Other metrics use aggregate with rate limit retry
-      let aggregateResponse = null;
-      try {
-        aggregateResponse = await axios.post(
-          'https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate',
-          {
-            aggregateBy: [{ dataTypeName }],
-            bucketByTime: { durationMillis: 86400000 },
-            startTimeMillis: dayStart(dateList[0]),
-            endTimeMillis: dayEnd(dateList[dateList.length - 1])
-          },
-          { headers }
-        );
-      } catch (err) {
-        if (err.response?.status === 429) {
-          console.warn(`[ActivityHistory] Rate limited (429), using cached database data for ${type}`);
-          // Fall back to database cache on rate limit
-          dateList.forEach(d => {
-            const val = dbMap[d] || 0;
-            result.push({ label: d, date: d, value: val });
-            upserts.push({ date: d, value: val });
-          });
-          return res.json(result);
-        }
-        throw err;
-      }
-
-      const valueMap = {};
-      aggregateResponse.data?.bucket?.forEach((bucket, idx) => {
-        const date = dateList[idx];
-        let val = 0;
-        const point = bucket.dataset?.[0]?.point?.[0];
-        if (point?.value) {
-          if (type === 'heart') {
-            val = Math.round(point.value[0]?.fpVal || 0);
-          } else if (type === 'weight') {
-            val = Math.round((point.value[0]?.fpVal || 0) * 100) / 100;
-          } else {
-            val = Math.round(point.value[0]?.intVal || point.value[0]?.fpVal || 0);
-          }
-        }
-        valueMap[date] = val;
-      });
-
-      dateList.forEach(d => {
-        const val = valueMap[d] || 0;
-        result.push({ label: d, date: d, value: val });
-        upserts.push({ date: d, value: val });
-      });
-    }
-
-    console.log(`[ActivityHistory] API SUCCESS: ${result.length} points | Caching ${upserts.length} items`);
-
-    // Cache results
-    db.serialize(() => {
-      const stmtInsert = db.prepare(`INSERT OR IGNORE INTO daily_summary (date) VALUES (?)`);
-      const stmtUpdate = db.prepare(`UPDATE daily_summary SET ${dbColumn} = ? WHERE date = ?`);
-      db.run("BEGIN TRANSACTION");
-      upserts.forEach(item => {
-        stmtInsert.run(item.date);
-        stmtUpdate.run(item.value, item.date);
-      });
-      db.run("COMMIT");
-      stmtInsert.finalize();
-      stmtUpdate.finalize();
-    });
-
+    const result = await MetricHistory.getRange(type, targetDate, range, accessToken);
     res.json(result);
-
   } catch (error) {
-    const errorDetail = error.message || error.toString();
-    console.error(`[ActivityHistory] CRITICAL ERROR:`, errorDetail);
-    res.status(500).json({ error: `Failed to fetch ${type} data`, details: errorDetail });
+    console.error('[ActivityHistory] Error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch activity history' });
   }
 });
 
