@@ -5,13 +5,11 @@ import {
 } from 'recharts';
 import { Activity } from 'lucide-react';
 import useMetricHistory from '../hooks/useMetricHistory';
+import { formatDate, formatShortDate } from '../utils/formatDate';
 
 const ActivityChart = ({ token, date, title = "Activity Trends", icon: Icon = Activity, metricType = 'steps', unit = 'steps', color = 'cyan', isDarkMode = true, onDateSelect }) => {
     const [range, setRange] = useState('week'); // 'day', 'week', 'month'
     const { data, loading, error } = useMetricHistory(token, localStorage.getItem('fitbit_refresh_token'), date, metricType, range);
-
-    const formatDate = (dateStr) =>
-        new Date(dateStr + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 
     // Color Maps
     const colorMap = {
@@ -122,7 +120,7 @@ const ActivityChart = ({ token, date, title = "Activity Trends", icon: Icon = Ac
                                     onClick={(data) => onDateSelect?.(data.value)}
                                     tick={({ x, y, payload }) => {
                                         const label = range === 'month'
-                                            ? new Date(payload.value + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })
+                                            ? formatShortDate(payload.value)
                                             : formatDate(payload.value);
                                         return (
                                             <g transform={`translate(${x},${y})`} style={{ cursor: onDateSelect ? 'pointer' : 'default' }}>

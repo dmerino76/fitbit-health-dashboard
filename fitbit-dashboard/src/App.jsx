@@ -10,6 +10,7 @@ import {
     BarChart, Bar, XAxis, YAxis, CartesianGrid
 } from 'recharts';
 import ActivityChart from './components/ActivityChart';
+import { formatDate } from './utils/formatDate';
 
 function App() {
     const [token, setToken] = useState(null);
@@ -38,11 +39,6 @@ function App() {
         d.setDate(d.getDate() - (SLIDER_DAYS - 1 - idx));
         return d.toISOString().split('T')[0];
     };
-
-    const formatDate = (dateStr) =>
-        new Date(dateStr + 'T00:00:00').toLocaleDateString('en-GB', {
-            day: '2-digit', month: 'short', year: 'numeric'
-        });
 
     useEffect(() => {
         const params = new URLSearchParams(window.location.search);
