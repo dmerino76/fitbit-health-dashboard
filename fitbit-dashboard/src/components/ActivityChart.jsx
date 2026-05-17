@@ -1,38 +1,14 @@
-import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import React, { useState } from 'react';
 import {
     BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
     AreaChart, Area, CartesianGrid
 } from 'recharts';
 import { Activity } from 'lucide-react';
+import useMetricHistory from '../hooks/useMetricHistory';
 
 const ActivityChart = ({ token, date, title = "Activity Trends", icon: Icon = Activity, metricType = 'steps', unit = 'steps', color = 'cyan', isDarkMode = true, onDateSelect }) => {
     const [range, setRange] = useState('week'); // 'day', 'week', 'month'
-    const [data, setData] = useState([]);
-    const [loading, setLoading] = useState(false);
-
-    useEffect(() => {
-        if (token) {
-            fetchHistory();
-        }
-    }, [token, date, range, metricType]);
-
-    const fetchHistory = async () => {
-        setLoading(true);
-        try {
-            const refreshToken = localStorage.getItem('fitbit_refresh_token');
-            const response = await axios.get(`http://localhost:3000/api/activity-history`, {
-                params: { date, range, type: metricType, refresh: refreshToken },
-                headers: { Authorization: `Bearer ${token}` }
-            });
-            setData(response.data);
-        } catch (error) {
-            console.error("Error fetching history", error);
-            setData([]);
-        } finally {
-            setLoading(false);
-        }
-    };
+    const { data, loading, error } = useMetricHistory(token, localStorage.getItem('fitbit_refresh_token'), date, metricType, range);
 
     const formatDate = (dateStr) =>
         new Date(dateStr + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
@@ -180,6 +156,11 @@ const ActivityChart = ({ token, date, title = "Activity Trends", icon: Icon = Ac
                             </BarChart>
                         )}
                     </ResponsiveContainer>
+                ) : error ? (
+                    <div className="h-full flex flex-col items-center justify-center text-red-400">
+                        <p className="font-medium">Failed to load</p>
+                        <p className="text-xs mt-1 opacity-70">{error.message}</p>
+                    </div>
                 ) : (
                     <div className="h-full flex flex-col items-center justify-center text-gray-500">
                         <p>No data available.</p>
