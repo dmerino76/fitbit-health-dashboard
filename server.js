@@ -43,20 +43,10 @@ db.serialize(() => {
     key TEXT PRIMARY KEY,
     value TEXT
   )`);
-  // Purge health_data_cache entries poisoned with zero sleep (cached before sleep synced to Google Fit)
-  db.run(`DELETE FROM health_data_cache
-          WHERE CAST(json_extract(data, '$.sleepSummary.totalMinutesAsleep') AS INTEGER) = 0
-             OR json_extract(data, '$.sleepSummary.totalMinutesAsleep') IS NULL`);
-  db.run(`DELETE FROM health_data_cache
-          WHERE CAST(json_extract(data, '$.heartRate[0].value.avgBpm') AS REAL) = 0
-             OR json_extract(data, '$.heartRate[0].value.avgBpm') IS NULL`);
-  // Clear stale zero-sleep rows from daily_summary so trend chart re-fetches real values
-  db.run(`UPDATE daily_summary SET sleep_minutes = NULL WHERE sleep_minutes = 0`);
-  // Purge health_data_cache entries poisoned with missing heart rate data
-  db.run(`DELETE FROM health_data_cache
-          WHERE CAST(json_extract(data, '$.heartRate[0].value.avgBpm') AS REAL) = 0
-             OR json_extract(data, '$.heartRate[0].value.avgBpm') IS NULL`);
+  // poisoning guard moved to CacheStore.setSnapshot
 });
+
+const CacheStore = require('./lib/cache')(db);
 
 // Google OAuth2 Setup
 const oauth2Client = new google.auth.OAuth2(
@@ -455,14 +445,10 @@ app.get('/api/health-data', async (req, res) => {
 
     // Check cache for non-today dates
     if (!isToday) {
-      const cached = await new Promise((resolve) => {
-        db.get("SELECT data FROM health_data_cache WHERE date = ?", [today], (err, row) => {
-          resolve(row);
-        });
-      });
+      const cached = await CacheStore.getSnapshot(today);
       if (cached) {
         console.log(`[API-CACHE] Health data hit for ${today}`);
-        return res.json(JSON.parse(cached.data));
+        return res.json(cached);
       }
     }
 
@@ -586,16 +572,9 @@ app.get('/api/health-data', async (req, res) => {
       heartIntraday: heartIntradayData
     });
 
-    // Cache the result for past dates — skip if sleep or HR is missing to avoid poisoning the cache
-    if (
-      !isToday &&
-      (result.sleepSummary?.totalMinutesAsleep ?? 0) > 0 &&
-      (result.heartRate?.[0]?.value?.avgBpm ?? 0) > 0
-    ) {
-      db.run(
-        "INSERT OR REPLACE INTO health_data_cache (date, data, created_at) VALUES (?, ?, ?)",
-        [today, JSON.stringify(result), Math.floor(Date.now() / 1000)]
-      );
+    // Cache the result for past dates
+    if (!isToday) {
+      await CacheStore.setSnapshot(today, result);
     }
 
     res.json(result);
@@ -913,19 +892,7 @@ async function cacheHistoricalData() {
           heartIntraday: heartIntradayData
         });
 
-        // Cache to database — skip if sleep or HR is missing to avoid re-poisoning the cache
-        if (
-          (result.sleepSummary?.totalMinutesAsleep ?? 0) > 0 &&
-          (result.heartRate?.[0]?.value?.avgBpm ?? 0) > 0
-        ) {
-          db.run(
-            "INSERT OR REPLACE INTO health_data_cache (date, data, created_at) VALUES (?, ?, ?)",
-            [dateStr, JSON.stringify(result), Math.floor(Date.now() / 1000)]
-          );
-        }
-
-        // Also update daily_summary with key metrics
-        db.run(`INSERT OR IGNORE INTO daily_summary (date) VALUES (?)`, [dateStr]);
+        await CacheStore.setSnapshot(dateStr, result);
 
         const steps = result.activity?.summary?.steps || 0;
         const sleepMins = result.sleepSummary?.totalMinutesAsleep || 0;
@@ -933,10 +900,7 @@ async function cacheHistoricalData() {
         const weight = result.body || 0;
 
         if (steps > 0 || sleepMins > 0 || hr > 0 || weight > 0) {
-          db.run(
-            `UPDATE daily_summary SET steps = ?, sleep_minutes = ?, resting_hr = ?, weight = ? WHERE date = ?`,
-            [steps, sleepMins || null, hr, weight, dateStr]
-          );
+          await CacheStore.setDailySummary(dateStr, { steps, restingHr: hr, sleepMinutes: sleepMins, weight });
         }
 
         console.log(`[CACHE] Cached ${dateStr}`);
