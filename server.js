@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 3000;
 
 const axios = require('axios');
 const { google } = require('googleapis');
-const { dayStart, dayEnd, toRFC3339, getDatesInRange } = require('./dateHelpers');
+const { dayStart, dayEnd, toRFC3339, getDatesInRange } = require('./lib/dateHelpers');
 
 // Database Setup
 const sqlite3 = require('sqlite3').verbose();
